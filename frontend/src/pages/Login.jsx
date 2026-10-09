@@ -22,8 +22,8 @@ export default function Login() {
 
     setLoading(true);
     try {
-      await login(ugrId.trim(), password); // calls api.js
-      navigate("/eligibility"); // success: go to the next page
+      const data = await login(ugrId.trim(), password); // calls api.js
+      navigate(data.student.voter_type === "AUTHORITY" ? "/authority" : "/eligibility");
     } catch (err) {
       setError(err.message); // e.g. "Invalid ID or password"
     } finally {

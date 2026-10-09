@@ -115,3 +115,70 @@ input:focus { outline: 3px solid rgba(31, 63, 122, 0.3); border-color: var(--blu
 }
 .check { display: flex; align-items: center; gap: 10px; font-weight: 500; margin: 8px 0 0; }
 .check input { width: 20px; height: 20px; }
+
+/* ---- Authority elector dashboard ---- */
+.authority-page { justify-content: flex-start; padding-top: 36px; }
+.authority-card { max-width: 760px; border-top-color: var(--gold); }
+.authority-eyebrow {
+  margin: 0 0 8px;
+  color: #775513;
+  font-weight: 700;
+  letter-spacing: 0.03em;
+}
+.authority-deadline {
+  padding: 12px 14px;
+  border-radius: 6px;
+  background: #fff6e0;
+  color: #62490f;
+  font-weight: 700;
+}
+.authority-proposals, .authority-results {
+  margin: 24px 0;
+  padding-top: 8px;
+  border-top: 1px solid #e1e5ed;
+}
+.authority-proposals h2, .authority-results h2 { font-size: 1.15rem; }
+.proposal {
+  padding: 14px 0;
+  border-bottom: 1px solid #e8ebf1;
+}
+.proposal h3 { margin: 0 0 6px; font-size: 1rem; }
+.proposal h3 span { color: var(--muted); font-weight: 500; }
+.proposal p { margin: 0; color: var(--muted); white-space: pre-wrap; }
+.authority-ballot fieldset {
+  margin: 20px 0;
+  padding: 14px;
+  border: 1px solid #d6dce7;
+  border-radius: 8px;
+}
+.authority-ballot legend { padding: 0 6px; font-weight: 700; }
+.authority-candidate {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 12px 4px;
+  margin: 0;
+  border-bottom: 1px solid #edf0f5;
+  cursor: pointer;
+}
+.authority-candidate:last-child { border-bottom: 0; }
+.authority-candidate input { width: 18px; height: 18px; margin-top: 2px; }
+.authority-candidate span { display: grid; gap: 4px; }
+.authority-candidate small { color: var(--muted); font-size: 0.9rem; font-weight: 400; }
+.authority-closed { text-align: center; }
+.authority-farewell { max-width: 600px; margin: 18px auto 28px; line-height: 1.7; }
+.authority-results { text-align: left; }
+.result-row {
+  display: grid;
+  grid-template-columns: minmax(130px, 1fr) 2fr;
+  gap: 16px;
+  padding: 13px 0;
+  border-bottom: 1px solid #e8ebf1;
+}
+.result-row dt { font-weight: 700; }
+.result-row dd { margin: 0; color: var(--muted); }
+.success { color: var(--green); font-weight: 700; }
+
+@media (max-width: 560px) {
+  .result-row { grid-template-columns: 1fr; gap: 4px; }
+}

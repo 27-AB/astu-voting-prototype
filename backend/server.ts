@@ -1,5 +1,6 @@
 import express from 'express';
 import type { Request, Response, NextFunction } from 'express';
+import 'dotenv/config';
 import cors from 'cors';
 import crypto from 'node:crypto';
 import bcrypt from 'bcryptjs';
@@ -8,6 +9,7 @@ import {
   executeQuery,
   executeQueryOne,
   executeRun,
+  castAnonymousVote,
   performRollover
 } from './db.js';
 
@@ -18,6 +20,8 @@ interface StudentRecord {
   cgpa: number;
   department: string;
   password_hash: string;
+  voter_type: 'STANDARD' | 'AUTHORITY';
+  vote_weight: number;
 }
 interface CafeteriaRecord {
   is_active: number;
@@ -44,9 +48,61 @@ interface AdminUserRecord {
 const app = express();
 const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : 3000;
 const SESSION_TTL_MS = 2 * 60 * 60 * 1000; // 2 hours
+const WINNING_POSITIONS = ['President', 'Vice President', 'Secretary'];
+
+function getElectionWindow() {
+  const start = process.env.ELECTION_START_TIME;
+  const end = process.env.ELECTION_END_TIME;
+  if (!start || !end) return null;
+
+  const zonedIsoTimestamp = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/i;
+  if (!zonedIsoTimestamp.test(start) || !zonedIsoTimestamp.test(end)) return null;
+  const startMs = Date.parse(start);
+  const endMs = Date.parse(end);
+  if (!Number.isFinite(startMs) || !Number.isFinite(endMs) || startMs >= endMs) return null;
+  return { start, end, startMs, endMs };
+}
+
+function getElectionPhase() {
+  const window = getElectionWindow();
+  if (!window) return null;
+  const now = Date.now();
+  return {
+    election_start_time: window.start,
+    election_end_time: window.end,
+    server_time: new Date(now).toISOString(),
+    phase: now < window.startMs ? 'scheduled' : now < window.endMs ? 'open' : 'closed',
+    is_open: now >= window.startMs && now < window.endMs
+  };
+}
+
+function readCandidateResults() {
+  return executeQuery<{
+    candidate_id: number;
+    name: string;
+    position: string;
+    votes: number;
+  }>(`
+    SELECT c.id AS candidate_id, c.name, c.position,
+           COALESCE(SUM(v.vote_weight), 0) AS votes
+    FROM candidates c
+    LEFT JOIN votes v ON c.id = v.candidate_id
+    GROUP BY c.id
+    ORDER BY c.position ASC, votes DESC, c.id ASC
+  `);
+}
 
 app.use(cors());
 app.use(express.json());
+
+app.get('/api/election/status', (_req: Request, res: Response) => {
+  const status = getElectionPhase();
+  if (!status) {
+    res.status(503).json({ error: 'Election schedule is not configured correctly' });
+    return;
+  }
+  res.json(status);
+});
 
 // ---------- In-memory sessions ----------
 const studentSessions = new Map<string, { ugr_id: string; createdAt: number }>();
@@ -128,7 +184,7 @@ app.post('/api/login', rateLimiter(15, 60000), (req: Request, res: Response) => 
 
   const cleanUgrId = ugr_id.trim().toUpperCase();
   const student = executeQueryOne<StudentRecord>(
-    'SELECT * FROM registrar_students WHERE UPPER(ugr_id) = ?',
+    'SELECT ugr_id, name, cgpa, department, password_hash, voter_type, vote_weight FROM registrar_students WHERE UPPER(ugr_id) = ?',
     [cleanUgrId]
   );
 
@@ -140,7 +196,15 @@ app.post('/api/login', rateLimiter(15, 60000), (req: Request, res: Response) => 
   const sessionToken = `stu_sess_${crypto.randomBytes(24).toString('hex')}`;
   studentSessions.set(sessionToken, { ugr_id: student.ugr_id, createdAt: Date.now() });
 
-  res.json({ token: sessionToken });
+  res.json({
+    token: sessionToken,
+    student: {
+      ugr_id: student.ugr_id,
+      name: student.name,
+      voter_type: student.voter_type,
+      vote_weight: student.vote_weight
+    }
+  });
 });
 
 // GET /api/eligibility
@@ -186,8 +250,8 @@ app.get('/api/eligibility', requireStudentAuth, (req: Request, res: Response) =>
 app.post('/api/token', requireStudentAuth, rateLimiter(5, 60000), (req: Request, res: Response) => {
   const ugr_id = (req as any).studentUgrId as string;
 
-  const student = executeQueryOne<StudentRecord>(
-    'SELECT cgpa FROM registrar_students WHERE ugr_id = ?',
+  const student = executeQueryOne<Pick<StudentRecord, 'cgpa' | 'voter_type' | 'vote_weight'>>(
+    'SELECT cgpa, voter_type, vote_weight FROM registrar_students WHERE ugr_id = ?',
     [ugr_id]
   );
   const cafeteria = executeQueryOne<CafeteriaRecord>(
@@ -226,7 +290,10 @@ app.post('/api/token', requireStudentAuth, rateLimiter(5, 60000), (req: Request,
   const tokenHash = crypto.createHash('sha256').update(rawToken).digest('hex');
 
   // Only the hash is stored, with NO link to the student
-  executeRun('INSERT INTO tokens (token_hash, is_used) VALUES (?, 0)', [tokenHash]);
+  executeRun(
+    'INSERT INTO tokens (token_hash, is_used, vote_weight) VALUES (?, 0, ?)',
+    [tokenHash, student.vote_weight]
+  );
 
   res.json({ token: rawToken });
 });
@@ -243,8 +310,22 @@ app.get('/api/candidates', (_req: Request, res: Response) => {
   res.json(candidates);
 });
 
-// POST /api/vote  (no login: the token is the proof)
+// POST /api/vote (anonymous token is the proof; vote weight comes from its server-side record)
 app.post('/api/vote', rateLimiter(20, 60000), (req: Request, res: Response) => {
+  const phase = getElectionPhase();
+  if (!phase) {
+    res.status(503).json({ error: 'Election schedule is not configured correctly' });
+    return;
+  }
+  if (phase.phase === 'scheduled') {
+    res.status(403).json({ error: 'Election has not started' });
+    return;
+  }
+  if (phase.phase === 'closed') {
+    res.status(403).json({ error: 'Election Closed' });
+    return;
+  }
+
   const { token, candidate_id, votes } = req.body || {};
 
   if (!token || typeof token !== 'string' || !token.trim()) {
@@ -255,60 +336,38 @@ app.post('/api/vote', rateLimiter(20, 60000), (req: Request, res: Response) => {
   const cleanToken = token.trim().toUpperCase();
   const tokenHash = crypto.createHash('sha256').update(cleanToken).digest('hex');
 
-  const tokenRecord = executeQueryOne<{ token_hash: string; is_used: number }>(
-    'SELECT token_hash, is_used FROM tokens WHERE token_hash = ?',
-    [tokenHash]
-  );
-  if (!tokenRecord) {
-    res.status(400).json({ error: 'Invalid token' });
-    return;
-  }
-  if (tokenRecord.is_used === 1) {
-    res.status(400).json({ error: 'Token already used' });
-    return;
-  }
-
   // Accept a single candidate_id, or an array "votes" (one per position)
   const ids: number[] = [];
-  if (Array.isArray(votes) && votes.length > 0) {
-    for (const v of votes) {
-      const n = Number(v);
-      if (Number.isInteger(n)) ids.push(n);
-    }
+  if (Array.isArray(votes) && votes.length > 0 && votes.every(Number.isInteger)) {
+    ids.push(...votes);
   } else if (candidate_id !== undefined && candidate_id !== null) {
-    const n = Number(candidate_id);
-    if (Number.isInteger(n)) ids.push(n);
+    if (Number.isInteger(candidate_id)) ids.push(candidate_id);
   }
 
-  if (ids.length === 0) {
+  if (ids.length === 0 || new Set(ids).size !== ids.length) {
     res.status(400).json({ error: 'Candidate does not exist' });
     return;
   }
 
-  const positionsSeen = new Set<string>();
-  for (const cid of ids) {
-    const cand = executeQueryOne<{ id: number; position: string }>(
-      'SELECT id, position FROM candidates WHERE id = ?',
-      [cid]
-    );
-    if (!cand) {
-      res.status(400).json({ error: 'Candidate does not exist' });
-      return;
-    }
-    if (positionsSeen.has(cand.position)) {
-      res.status(400).json({ error: 'Only one candidate per position is allowed' });
-      return;
-    }
-    positionsSeen.add(cand.position);
+  const result = castAnonymousVote(tokenHash, ids);
+  if (result.status === 'invalid-token') {
+    res.status(400).json({ error: 'Invalid token' });
+    return;
+  }
+  if (result.status === 'used-token') {
+    res.status(400).json({ error: 'Token already used' });
+    return;
+  }
+  if (result.status === 'invalid-candidate') {
+    res.status(400).json({ error: 'Candidate does not exist' });
+    return;
+  }
+  if (result.status === 'duplicate-position') {
+    res.status(400).json({ error: 'Only one candidate per position is allowed' });
+    return;
   }
 
-  // Burn the token FIRST, then record the vote (votes have NO identity, NO token, NO timestamp)
-  executeRun('UPDATE tokens SET is_used = 1 WHERE token_hash = ?', [tokenHash]);
-  for (const cid of ids) {
-    executeRun('INSERT INTO votes (candidate_id) VALUES (?)', [cid]);
-  }
-
-  res.json({ message: 'Vote recorded' });
+  res.json({ message: 'Vote recorded', vote_weight: result.voteWeight });
 });
 
 // GET /api/announcements
@@ -426,18 +485,7 @@ app.get('/api/admin/results', requireAdminAuth, (_req: Request, res: Response) =
   const tokensUsed =
     executeQueryOne<{ count: number }>('SELECT COUNT(*) as count FROM tokens WHERE is_used = 1')?.count || 0;
 
-  const candidateResults = executeQuery<{
-    id: number;
-    name: string;
-    position: string;
-    vote_count: number;
-  }>(`
-    SELECT c.id, c.name, c.position, COUNT(v.id) as vote_count
-    FROM candidates c
-    LEFT JOIN votes v ON c.id = v.candidate_id
-    GROUP BY c.id
-    ORDER BY c.position ASC, vote_count DESC
-  `);
+  const candidateResults = readCandidateResults();
 
   const percent = eligibleVoters > 0 ? Number(((tokensUsed / eligibleVoters) * 100).toFixed(1)) : 0;
 
@@ -447,13 +495,27 @@ app.get('/api/admin/results', requireAdminAuth, (_req: Request, res: Response) =
       eligible_voters: eligibleVoters,
       percent
     },
-    results: candidateResults.map((c) => ({
-      candidate_id: c.id,
-      name: c.name,
-      position: c.position,
-      votes: c.vote_count
-    }))
+    results: candidateResults
   });
+});
+
+app.get('/api/results', requireStudentAuth, (_req: Request, res: Response) => {
+  const phase = getElectionPhase();
+  if (!phase) {
+    res.status(503).json({ error: 'Election schedule is not configured correctly' });
+    return;
+  }
+  if (phase.phase !== 'closed') {
+    res.status(403).json({ error: 'Final results are available after the election closes' });
+    return;
+  }
+
+  const results = readCandidateResults();
+  const winners = WINNING_POSITIONS.flatMap((position) => {
+    const winner = results.find((candidate) => candidate.position.toLowerCase() === position.toLowerCase());
+    return winner ? [{ ...winner, position }] : [];
+  });
+  res.json({ election_end_time: phase.election_end_time, winners, results });
 });
 
 // POST /api/admin/rollover

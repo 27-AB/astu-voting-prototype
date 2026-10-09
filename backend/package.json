@@ -6,7 +6,8 @@
   "type": "module",
   "scripts": {
     "start": "tsx server.ts",
-    "dev": "tsx server.ts"
+    "dev": "tsx server.ts",
+    "test": "node --test"
   },
   "dependencies": {
     "bcryptjs": "^3.0.2",

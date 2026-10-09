@@ -8,6 +8,30 @@ const DB_FILE = path.join(DB_DIR, 'astu_voting.sqlite');
 
 let dbInstance = null;
 
+function hasColumn(db, table, column) {
+  const result = db.exec(`PRAGMA table_info(${table})`);
+  return result[0]?.values.some((row) => row[1] === column) ?? false;
+}
+
+function addColumnIfMissing(db, table, column, definition) {
+  if (!hasColumn(db, table, column)) {
+    db.run(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
+  }
+}
+
+function configuredAuthorityIds() {
+  const rawIds = process.env.AUTHORITY_IDS || process.env.VIP_STUDENT_IDS;
+  if (!rawIds) {
+    throw new Error('AUTHORITY_IDS must be configured with exactly three registered authority IDs.');
+  }
+
+  const ids = rawIds.split(',').map((id) => id.trim().toUpperCase()).filter(Boolean);
+  if (ids.length !== 3 || new Set(ids).size !== 3) {
+    throw new Error('AUTHORITY_IDS must contain exactly three distinct authority IDs.');
+  }
+  return ids;
+}
+
 // Demo accounts: IDs match docs/api.md. Password for all students: demo123
 export const DEMO_ACCOUNTS = [
   { ugr_id: 'UGR/0001/15', name: 'Eyerusalem Melaku', cgpa: 3.88, department: 'Software Engineering', cafeteria_active: true, expected_status: 'Eligible' },
@@ -39,6 +63,7 @@ export async function getDb() {
   dbInstance = db;
   initializeTables(db);
   seedIfEmpty(db);
+  applyAuthorityConfiguration(db);
   saveDb(db);
   return db;
 }
@@ -60,7 +85,9 @@ function initializeTables(db) {
       name TEXT NOT NULL,
       cgpa REAL NOT NULL,
       department TEXT NOT NULL,
-      password_hash TEXT NOT NULL
+      password_hash TEXT NOT NULL,
+      voter_type TEXT NOT NULL DEFAULT 'STANDARD' CHECK (voter_type IN ('STANDARD', 'AUTHORITY')),
+      vote_weight INTEGER NOT NULL DEFAULT 1 CHECK (vote_weight IN (1, 3))
     );
 
     CREATE TABLE IF NOT EXISTS cafeteria_records (
@@ -77,7 +104,8 @@ function initializeTables(db) {
 
     CREATE TABLE IF NOT EXISTS tokens (
       token_hash TEXT PRIMARY KEY,
-      is_used INTEGER NOT NULL DEFAULT 0
+      is_used INTEGER NOT NULL DEFAULT 0,
+      vote_weight INTEGER NOT NULL DEFAULT 1 CHECK (vote_weight IN (1, 3))
     );
 
     CREATE TABLE IF NOT EXISTS candidates (
@@ -93,6 +121,7 @@ function initializeTables(db) {
     CREATE TABLE IF NOT EXISTS votes (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       candidate_id INTEGER NOT NULL,
+      vote_weight INTEGER NOT NULL DEFAULT 1 CHECK (vote_weight IN (1, 3)),
       FOREIGN KEY (candidate_id) REFERENCES candidates(id)
     );
 
@@ -109,6 +138,33 @@ function initializeTables(db) {
       role TEXT NOT NULL DEFAULT 'electoral_board'
     );
   `);
+
+  addColumnIfMissing(db, 'registrar_students', 'voter_type', "TEXT NOT NULL DEFAULT 'STANDARD' CHECK (voter_type IN ('STANDARD', 'AUTHORITY'))");
+  addColumnIfMissing(db, 'registrar_students', 'vote_weight', 'INTEGER NOT NULL DEFAULT 1 CHECK (vote_weight IN (1, 3))');
+  addColumnIfMissing(db, 'tokens', 'vote_weight', 'INTEGER NOT NULL DEFAULT 1 CHECK (vote_weight IN (1, 3))');
+  addColumnIfMissing(db, 'votes', 'vote_weight', 'INTEGER NOT NULL DEFAULT 1 CHECK (vote_weight IN (1, 3))');
+}
+
+function applyAuthorityConfiguration(db) {
+  const authorityIds = configuredAuthorityIds();
+  if (authorityIds.length === 0) return;
+
+  const placeholders = authorityIds.map(() => '?').join(', ');
+  const registered = db.exec(
+    `SELECT COUNT(*) FROM registrar_students WHERE UPPER(ugr_id) IN (${placeholders})`,
+    authorityIds
+  )[0].values[0][0];
+  if (registered !== authorityIds.length) {
+    throw new Error('Every ID in AUTHORITY_IDS must match a registered authority record.');
+  }
+
+  db.run("UPDATE registrar_students SET voter_type = 'STANDARD', vote_weight = 1");
+  for (const id of authorityIds) {
+    db.run(
+      "UPDATE registrar_students SET voter_type = 'AUTHORITY', vote_weight = 3 WHERE UPPER(ugr_id) = ?",
+      [id]
+    );
+  }
 }
 
 function seedIfEmpty(db) {
@@ -135,7 +191,9 @@ function seedIfEmpty(db) {
     ['Abel Tesfaye', 'President', '4th year, Computer Science.', 'Better dorm internet and study spaces.'],
     ['Hana Bekele', 'President', '4th year, Electrical Eng.', 'Open student budget and cafeteria feedback.'],
     ['Samuel Girma', 'Vice President', '3rd year, Civil Eng.', 'Faster clearance and clubs support.'],
-    ['Marta Alemu', 'Vice President', '3rd year, Software Eng.', 'Mentorship program for first years.']
+    ['Marta Alemu', 'Vice President', '3rd year, Software Eng.', 'Mentorship program for first years.'],
+    ['Liya Abebe', 'Secretary', '3rd year, Computer Science.', 'Publish clear meeting notes and student decisions.'],
+    ['Yonas Kebede', 'Secretary', '3rd year, Information Systems.', 'Make union communication timely and accessible.']
   ];
   for (const c of cands) {
     db.run('INSERT INTO candidates (name, position, bio, manifesto) VALUES (?,?,?,?)', c);
@@ -171,6 +229,67 @@ export function executeRun(sql, params = []) {
   const changes = dbInstance.getRowsModified();
   saveDb(dbInstance);
   return { changes };
+}
+
+export function castAnonymousVote(tokenHash, candidateIds) {
+  if (!dbInstance) throw new Error('Database not initialized');
+  const db = dbInstance;
+
+  db.run('BEGIN IMMEDIATE TRANSACTION');
+  try {
+    const token = executeQueryOne(
+      'SELECT is_used, vote_weight FROM tokens WHERE token_hash = ?',
+      [tokenHash]
+    );
+    if (!token) {
+      db.run('ROLLBACK');
+      return { status: 'invalid-token' };
+    }
+    if (token.is_used === 1) {
+      db.run('ROLLBACK');
+      return { status: 'used-token' };
+    }
+
+    const positions = new Set();
+    for (const candidateId of candidateIds) {
+      const candidate = executeQueryOne(
+        'SELECT position FROM candidates WHERE id = ?',
+        [candidateId]
+      );
+      if (!candidate) {
+        db.run('ROLLBACK');
+        return { status: 'invalid-candidate' };
+      }
+      if (positions.has(candidate.position)) {
+        db.run('ROLLBACK');
+        return { status: 'duplicate-position' };
+      }
+      positions.add(candidate.position);
+    }
+
+    db.run(
+      'UPDATE tokens SET is_used = 1 WHERE token_hash = ? AND is_used = 0',
+      [tokenHash]
+    );
+    if (db.getRowsModified() !== 1) {
+      db.run('ROLLBACK');
+      return { status: 'used-token' };
+    }
+
+    for (const candidateId of candidateIds) {
+      db.run(
+        'INSERT INTO votes (candidate_id, vote_weight) VALUES (?, ?)',
+        [candidateId, token.vote_weight]
+      );
+    }
+
+    db.run('COMMIT');
+    saveDb(db);
+    return { status: 'recorded', voteWeight: token.vote_weight };
+  } catch (error) {
+    db.run('ROLLBACK');
+    throw error;
+  }
 }
 
 export function performRollover() {
