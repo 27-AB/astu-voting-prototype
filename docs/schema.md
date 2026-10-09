@@ -57,7 +57,11 @@ CREATE TABLE registrar_students (
     name TEXT NOT NULL,                    -- Student full name
     cgpa REAL NOT NULL,                    -- Cumulative GPA (must be strictly > 3.00 to vote)
     department TEXT NOT NULL,              -- Academic department / School
-    password_hash TEXT NOT NULL            -- bcrypt hash of student password
+    password_hash TEXT NOT NULL,           -- bcrypt hash of student password
+    voter_type TEXT NOT NULL DEFAULT 'STANDARD'
+        CHECK (voter_type IN ('STANDARD', 'AUTHORITY')),
+    vote_weight INTEGER NOT NULL DEFAULT 1
+        CHECK (vote_weight IN (1, 3))
 );
 ```
 
@@ -86,7 +90,9 @@ Stores one-way cryptographic hashes of generated voting tokens.
 ```sql
 CREATE TABLE tokens (
     token_hash TEXT PRIMARY KEY,          -- SHA-256 hash of the 128-bit random token
-    is_used INTEGER NOT NULL DEFAULT 0    -- 0 = Valid / Unspent, 1 = Expended / Voted
+    is_used INTEGER NOT NULL DEFAULT 0,   -- 0 = Valid / Unspent, 1 = Expended / Voted
+    vote_weight INTEGER NOT NULL DEFAULT 1
+        CHECK (vote_weight IN (1, 3))    -- Copied from voter roster; no student ID stored
 );
 ```
 *Note:* No student identifier exists in this table. When a student generates a token, the server computes `SHA256(raw_token)`, inserts `token_hash`, and immediately gives `raw_token` to the student. The server discards `raw_token` from memory.
@@ -111,6 +117,8 @@ The digital ballot box.
 CREATE TABLE votes (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     candidate_id INTEGER NOT NULL,
+    vote_weight INTEGER NOT NULL DEFAULT 1
+        CHECK (vote_weight IN (1, 3)),
     FOREIGN KEY (candidate_id) REFERENCES candidates(id)
 );
 ```
@@ -118,6 +126,7 @@ CREATE TABLE votes (
 - NO `ugr_id` column.
 - NO `token_hash` column.
 - NO timestamp column (prevents timing correlation with token claim or request logs).
+- Vote weight is copied from the anonymous, single-use token and is not accepted from the request body.
 
 ### 7. `announcements`
 Broadcast updates from the ASTU Electoral Board.
@@ -139,3 +148,13 @@ CREATE TABLE admin_users (
     role TEXT NOT NULL DEFAULT 'electoral_board'
 );
 ```
+
+## Weighted authority ballots
+
+This repository currently runs Express with `sql.js` and a local SQLite file; it does not use Prisma or PostgreSQL. Startup migrations add `voter_type`, `vote_weight` and token/ledger weight columns to existing SQLite files while preserving older standard ballots as weight 1.
+
+Set `AUTHORITY_IDS` in `backend/.env` to exactly three distinct, already-registered authority IDs. The code also accepts the legacy `VIP_STUDENT_IDS` value for compatibility. On startup, the backend validates all three IDs, marks only those authority records as `AUTHORITY` with weight 3, and resets all other roster entries to `STANDARD` with weight 1. A login response includes the server-sourced `voter_type` and `vote_weight` for routing/display. The vote handler ignores any client-supplied weight, consumes the token and appends each weighted candidate row in one SQLite transaction. Result tallies use `SUM(vote_weight)`.
+
+`ELECTION_START_TIME` and `ELECTION_END_TIME` must be timezone-qualified ISO-8601 timestamps. The public election-status endpoint reports the server clock; votes are rejected before the start and at or after the end. Final results are returned to authenticated students only after the end time.
+
+The current SQLite prototype is a single-process local database and is not suitable for horizontally scaled production deployments. Multi-instance production deployment requires migrating this transaction and schema to a shared transactional database such as PostgreSQL.

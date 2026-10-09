@@ -31,7 +31,15 @@ Request:
 ```
 Success (200):
 ```json
-{ "token": "jwt-string-here" }
+{
+  "token": "opaque-session-token",
+  "student": {
+    "ugr_id": "UGR/1234/15",
+    "name": "Student Name",
+    "voter_type": "AUTHORITY",
+    "vote_weight": 3
+  }
+}
 ```
 Error (401):
 ```json
@@ -83,8 +91,24 @@ Success (200):
 ]
 ```
 
+### GET /api/election/status
+Returns election timing from the server clock. `phase` is `scheduled`, `open`, or `closed`.
+
+Success (200):
+```json
+{
+  "election_start_time": "2026-11-01T09:00:00Z",
+  "election_end_time": "2026-11-01T17:00:00Z",
+  "server_time": "2026-11-01T09:00:01.000Z",
+  "phase": "open",
+  "is_open": true
+}
+```
+
+Voting is denied with 403 before the start and at or after the end. If either timestamp is missing or invalid, status and voting return 503 (fail closed).
+
 ### POST /api/vote
-Does not need login. The token is the proof.
+Does not need login. The token is the proof. The server reads the ballot's weight from its token record; any client-supplied weight is ignored.
 
 Request:
 ```json
@@ -92,7 +116,7 @@ Request:
 ```
 Success (200):
 ```json
-{ "message": "Vote recorded" }
+{ "message": "Vote recorded", "vote_weight": 3 }
 ```
 Errors:
 ```json
@@ -107,6 +131,23 @@ Errors:
 ```json
 { "error": "Candidate does not exist" }
 ```
+
+### GET /api/results
+Needs student login. Final results are only available once the server election clock reaches `election_end_time`.
+
+Success (200):
+```json
+{
+  "election_end_time": "2026-11-01T17:00:00Z",
+  "winners": [
+    { "candidate_id": 1, "name": "Candidate Name", "position": "President", "votes": 9 }
+  ],
+  "results": [
+    { "candidate_id": 1, "name": "Candidate Name", "position": "President", "votes": 9 }
+  ]
+}
+```
+`votes` is the sum of ballot weights. Each winner is the highest-weighted candidate for that position, with candidate ID as a deterministic tie-breaker.
 
 ### GET /api/announcements
 Success (200):
@@ -177,10 +218,11 @@ Success (200):
 {
   "turnout": { "votes_cast": 42, "eligible_voters": 80, "percent": 52.5 },
   "results": [
-    { "candidate_id": 1, "name": "Candidate Name", "position": "President", "votes": 20 }
+    { "candidate_id": 1, "name": "Candidate Name", "position": "President", "votes": 26 }
   ]
 }
 ```
+Results are weighted points, not a count of ballot submissions. `turnout.votes_cast` remains the number of spent tokens.
 
 ### POST /api/admin/rollover
 Simulates a new academic year. No request body.

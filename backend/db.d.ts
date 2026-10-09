@@ -3,6 +3,15 @@ export function saveDb(db?: any): void;
 export function executeQuery<T = any>(sql: string, params?: any[]): T[];
 export function executeQueryOne<T = any>(sql: string, params?: any[]): T | null;
 export function executeRun(sql: string, params?: any[]): { changes: number };
+export function castAnonymousVote(
+  tokenHash: string,
+  candidateIds: number[]
+):
+  | { status: 'invalid-token' }
+  | { status: 'used-token' }
+  | { status: 'invalid-candidate' }
+  | { status: 'duplicate-position' }
+  | { status: 'recorded'; voteWeight: number };
 export function performRollover(): {
   resetVotesCount: number;
   resetTokensCount: number;

@@ -67,10 +67,16 @@ export async function login(ugr_id, password) {
       throw new Error("Invalid ID or password");
     save("ugr_id", ugr_id);
     save("student_token", "mock-jwt-" + ugr_id);
-    return { token: "mock-jwt-" + ugr_id };
+    const student = { voter_type: "STANDARD", vote_weight: 1 };
+    save("voter_type", student.voter_type);
+    save("vote_weight", String(student.vote_weight));
+    return { token: "mock-jwt-" + ugr_id, student };
   }
   const data = await request("/api/login", "POST", { ugr_id, password });
   save("student_token", data.token);
+  save("student_name", data.student.name);
+  save("voter_type", data.student.voter_type);
+  save("vote_weight", String(data.student.vote_weight));
   return data;
 }
 
@@ -105,19 +111,34 @@ export async function getCandidates() {
   return request("/api/candidates");
 }
 
-export async function castVote(token, candidate_id) {
+export async function castVote(token, candidateIds) {
   if (USE_MOCK) {
     await wait();
     if (!token) throw new Error("Token is missing");
     if (usedTokens.has(token)) throw new Error("Token already used");
     if (!issuedTokens.has(token)) throw new Error("Invalid token");
-    if (!mockCandidates.find((c) => c.id === candidate_id))
+    const ids = Array.isArray(candidateIds) ? candidateIds : [candidateIds];
+    if (!ids.every((id) => mockCandidates.find((c) => c.id === id)))
       throw new Error("Candidate does not exist");
     usedTokens.add(token);
-    mockVotes[candidate_id] = (mockVotes[candidate_id] || 0) + 1;
+    for (const id of ids) mockVotes[id] = (mockVotes[id] || 0) + 1;
     return { message: "Vote recorded" };
   }
-  return request("/api/vote", "POST", { token, candidate_id });
+  return request(
+    "/api/vote",
+    "POST",
+    Array.isArray(candidateIds)
+      ? { token, votes: candidateIds }
+      : { token, candidate_id: candidateIds }
+  );
+}
+
+export async function getElectionStatus() {
+  return request("/api/election/status");
+}
+
+export async function getFinalResults() {
+  return request("/api/results", "GET", null, "student_token");
 }
 
 export async function getAnnouncements() {

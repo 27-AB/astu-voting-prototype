@@ -230,8 +230,23 @@ When Person B finishes the screens on Day 6, sit down together and verify these 
 ---
 
 ## 5. Automated Verification
-Person A has created an automated test script. At any time, you can verify your backend is functioning with:
+Run the backend tests from the `backend/` directory:
 ```bash
-npm run test:api
+npm test
 ```
-All 17 automated security and functional tests will execute and confirm 100% pass status.
+These tests verify the configured authority roster, server-derived weighted tallies, token replay rejection, and rollback of invalid ballots.
+
+---
+
+## 6. Authority weighted voting setup
+
+The checked-in backend uses Express and `sql.js`/SQLite (not Prisma/PostgreSQL). Copy `.env.example` to `.env`, then configure:
+
+- `AUTHORITY_IDS`: exactly three comma-separated IDs that already exist in `registrar_students`. The application fails startup if the list has anything other than three distinct IDs or any ID is not registered.
+- `ELECTION_START_TIME` and `ELECTION_END_TIME`: timezone-qualified ISO-8601 timestamps, with the start earlier than the end. Voting fails closed when these values are missing or invalid.
+
+The backend migration adds `voter_type` (`STANDARD`/`AUTHORITY`) and `vote_weight` (1/3) to the roster, and adds vote weight to the anonymous token and ballot ledger. At startup, only the configured IDs are authority voters with weight 3; all other roster rows are reset to standard weight 1. The raw token is never linked to the voter, and the voting API derives weight from that token's database row inside the same transaction that consumes it and records the ballot.
+
+Successful login includes `student.voter_type` and `student.vote_weight`. The frontend routes authority users to `/authority`, displays the three-point weight, loads candidate proposals and lets the elector submit one candidate per position. It polls the server election clock and, after closure, displays the final winners and the formal closing message. The API, not the browser timer, enforces the start/end boundary.
+
+From `backend/`, run `npm test` to validate authority assignment, weighted counting, replay rejection, and rollback on invalid ballots.
