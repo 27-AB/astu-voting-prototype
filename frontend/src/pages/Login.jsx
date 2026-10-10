@@ -23,7 +23,13 @@ export default function Login() {
     setLoading(true);
     try {
       const data = await login(ugrId.trim(), password); // calls api.js
-      navigate(data.student.voter_type === "AUTHORITY" ? "/authority" : "/eligibility");
+      navigate(
+        data.student.voter_type === "AUTHORITY"
+          ? "/judge"
+          : data.student.is_candidate
+            ? "/candidate"
+            : "/eligibility",
+      );
     } catch (err) {
       setError(err.message); // e.g. "Invalid ID or password"
     } finally {

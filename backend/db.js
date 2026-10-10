@@ -19,15 +19,27 @@ function addColumnIfMissing(db, table, column, definition) {
   }
 }
 
-function configuredAuthorityIds() {
-  const rawIds = process.env.AUTHORITY_IDS || process.env.VIP_STUDENT_IDS;
+function configuredJudgeIds() {
+  const rawIds = process.env.STUDENT_AFFAIRS_JUDGE_IDS || process.env.AUTHORITY_IDS;
   if (!rawIds) {
-    throw new Error('AUTHORITY_IDS must be configured with exactly three registered authority IDs.');
+    throw new Error('STUDENT_AFFAIRS_JUDGE_IDS must be configured with exactly two registered judge IDs.');
   }
 
   const ids = rawIds.split(',').map((id) => id.trim().toUpperCase()).filter(Boolean);
-  if (ids.length !== 3 || new Set(ids).size !== 3) {
-    throw new Error('AUTHORITY_IDS must contain exactly three distinct authority IDs.');
+  if (ids.length !== 2 || new Set(ids).size !== 2) {
+    throw new Error('STUDENT_AFFAIRS_JUDGE_IDS must contain exactly two distinct judge IDs.');
+  }
+  return ids;
+}
+
+function configuredParliamentIds() {
+  const rawIds = process.env.PARLIAMENT_VOTER_IDS;
+  if (!rawIds) {
+    throw new Error('PARLIAMENT_VOTER_IDS must list 50 to 100 registered eligible parliament voters.');
+  }
+  const ids = rawIds.split(',').map((id) => id.trim().toUpperCase()).filter(Boolean);
+  if (ids.length < 50 || ids.length > 100 || new Set(ids).size !== ids.length) {
+    throw new Error('PARLIAMENT_VOTER_IDS must contain 50 to 100 distinct voter IDs.');
   }
   return ids;
 }
@@ -86,8 +98,7 @@ function initializeTables(db) {
       cgpa REAL NOT NULL,
       department TEXT NOT NULL,
       password_hash TEXT NOT NULL,
-      voter_type TEXT NOT NULL DEFAULT 'STANDARD' CHECK (voter_type IN ('STANDARD', 'AUTHORITY')),
-      vote_weight INTEGER NOT NULL DEFAULT 1 CHECK (vote_weight IN (1, 3))
+      voter_type TEXT NOT NULL DEFAULT 'STANDARD' CHECK (voter_type IN ('STANDARD', 'AUTHORITY'))
     );
 
     CREATE TABLE IF NOT EXISTS cafeteria_records (
@@ -99,13 +110,13 @@ function initializeTables(db) {
     CREATE TABLE IF NOT EXISTS voter_registry (
       ugr_id TEXT PRIMARY KEY,
       has_received_token INTEGER NOT NULL DEFAULT 0,
+      is_registered INTEGER NOT NULL DEFAULT 0,
       FOREIGN KEY (ugr_id) REFERENCES registrar_students(ugr_id)
     );
 
     CREATE TABLE IF NOT EXISTS tokens (
       token_hash TEXT PRIMARY KEY,
-      is_used INTEGER NOT NULL DEFAULT 0,
-      vote_weight INTEGER NOT NULL DEFAULT 1 CHECK (vote_weight IN (1, 3))
+      is_used INTEGER NOT NULL DEFAULT 0
     );
 
     CREATE TABLE IF NOT EXISTS candidates (
@@ -115,13 +126,24 @@ function initializeTables(db) {
       bio TEXT NOT NULL,
       manifesto TEXT NOT NULL,
       department TEXT,
-      photo_url TEXT
+      photo_url TEXT,
+      student_ugr_id TEXT UNIQUE,
+      FOREIGN KEY (student_ugr_id) REFERENCES registrar_students(ugr_id)
+    );
+
+    CREATE TABLE IF NOT EXISTS judge_scores (
+      judge_ugr_id TEXT NOT NULL,
+      candidate_id INTEGER NOT NULL,
+      score INTEGER NOT NULL CHECK (score BETWEEN 0 AND 20),
+      updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      PRIMARY KEY (judge_ugr_id, candidate_id),
+      FOREIGN KEY (judge_ugr_id) REFERENCES registrar_students(ugr_id),
+      FOREIGN KEY (candidate_id) REFERENCES candidates(id)
     );
 
     CREATE TABLE IF NOT EXISTS votes (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       candidate_id INTEGER NOT NULL,
-      vote_weight INTEGER NOT NULL DEFAULT 1 CHECK (vote_weight IN (1, 3)),
       FOREIGN KEY (candidate_id) REFERENCES candidates(id)
     );
 
@@ -140,31 +162,33 @@ function initializeTables(db) {
   `);
 
   addColumnIfMissing(db, 'registrar_students', 'voter_type', "TEXT NOT NULL DEFAULT 'STANDARD' CHECK (voter_type IN ('STANDARD', 'AUTHORITY'))");
-  addColumnIfMissing(db, 'registrar_students', 'vote_weight', 'INTEGER NOT NULL DEFAULT 1 CHECK (vote_weight IN (1, 3))');
-  addColumnIfMissing(db, 'tokens', 'vote_weight', 'INTEGER NOT NULL DEFAULT 1 CHECK (vote_weight IN (1, 3))');
-  addColumnIfMissing(db, 'votes', 'vote_weight', 'INTEGER NOT NULL DEFAULT 1 CHECK (vote_weight IN (1, 3))');
+  addColumnIfMissing(db, 'voter_registry', 'is_registered', 'INTEGER NOT NULL DEFAULT 0 CHECK (is_registered IN (0, 1))');
+  addColumnIfMissing(db, 'candidates', 'student_ugr_id', 'TEXT REFERENCES registrar_students(ugr_id)');
 }
 
 function applyAuthorityConfiguration(db) {
-  const authorityIds = configuredAuthorityIds();
-  if (authorityIds.length === 0) return;
+  const judgeIds = configuredJudgeIds();
 
-  const placeholders = authorityIds.map(() => '?').join(', ');
+  const placeholders = judgeIds.map(() => '?').join(', ');
   const registered = db.exec(
     `SELECT COUNT(*) FROM registrar_students WHERE UPPER(ugr_id) IN (${placeholders})`,
-    authorityIds
+    judgeIds
   )[0].values[0][0];
-  if (registered !== authorityIds.length) {
-    throw new Error('Every ID in AUTHORITY_IDS must match a registered authority record.');
+  if (registered !== judgeIds.length) {
+    throw new Error('Every ID in STUDENT_AFFAIRS_JUDGE_IDS must match a registered judge record.');
   }
 
-  db.run("UPDATE registrar_students SET voter_type = 'STANDARD', vote_weight = 1");
-  for (const id of authorityIds) {
+  db.run("UPDATE registrar_students SET voter_type = 'STANDARD'");
+  for (const id of judgeIds) {
     db.run(
-      "UPDATE registrar_students SET voter_type = 'AUTHORITY', vote_weight = 3 WHERE UPPER(ugr_id) = ?",
+      "UPDATE registrar_students SET voter_type = 'AUTHORITY' WHERE UPPER(ugr_id) = ?",
       [id]
     );
   }
+}
+
+export function getConfiguredParliamentIds() {
+  return configuredParliamentIds();
 }
 
 function seedIfEmpty(db) {
@@ -231,6 +255,56 @@ export function executeRun(sql, params = []) {
   return { changes };
 }
 
+export function getCandidateRankings() {
+  const candidates = executeQuery(`
+    SELECT c.id AS candidate_id, c.name, c.position,
+           c.manifesto,
+           AVG(CASE WHEN judges.voter_type = 'AUTHORITY' THEN js.score END) AS judge_score,
+           COUNT(DISTINCT CASE WHEN judges.voter_type = 'AUTHORITY' THEN js.judge_ugr_id END) AS judge_count,
+           COUNT(DISTINCT v.id) AS parliament_votes
+    FROM candidates c
+    LEFT JOIN judge_scores js ON js.candidate_id = c.id
+    LEFT JOIN registrar_students judges ON judges.ugr_id = js.judge_ugr_id
+    LEFT JOIN votes v ON c.id = v.candidate_id
+    GROUP BY c.id
+    ORDER BY c.position ASC, c.id ASC
+  `);
+  const votesByPosition = new Map();
+  for (const candidate of candidates) {
+    votesByPosition.set(
+      candidate.position,
+      (votesByPosition.get(candidate.position) || 0) + candidate.parliament_votes
+    );
+  }
+
+  return candidates
+    .map((candidate) => {
+      const totalPositionVotes = votesByPosition.get(candidate.position) || 0;
+      const judgeScore = candidate.judge_score === null ? null : Number(candidate.judge_score);
+      const judgePoints = judgeScore === null ? 0 : (judgeScore / 20) * 30;
+      const parliamentShare = totalPositionVotes === 0
+        ? 0
+        : (candidate.parliament_votes / totalPositionVotes) * 70;
+      return {
+        ...candidate,
+        judge_score: judgeScore,
+        judge_points: Number(judgePoints.toFixed(2)),
+        parliament_share: Number(parliamentShare.toFixed(2)),
+        final_score: Number((judgePoints + parliamentShare).toFixed(2)),
+        votes: candidate.parliament_votes
+      };
+    })
+    .sort((a, b) =>
+      a.position.localeCompare(b.position) ||
+      b.final_score - a.final_score ||
+      a.candidate_id - b.candidate_id
+    )
+    .map((candidate, index, ranked) => ({
+      ...candidate,
+      rank: ranked.slice(0, index).filter((entry) => entry.position === candidate.position).length + 1
+    }));
+}
+
 export function castAnonymousVote(tokenHash, candidateIds) {
   if (!dbInstance) throw new Error('Database not initialized');
   const db = dbInstance;
@@ -238,7 +312,7 @@ export function castAnonymousVote(tokenHash, candidateIds) {
   db.run('BEGIN IMMEDIATE TRANSACTION');
   try {
     const token = executeQueryOne(
-      'SELECT is_used, vote_weight FROM tokens WHERE token_hash = ?',
+      'SELECT is_used FROM tokens WHERE token_hash = ?',
       [tokenHash]
     );
     if (!token) {
@@ -266,6 +340,10 @@ export function castAnonymousVote(tokenHash, candidateIds) {
       }
       positions.add(candidate.position);
     }
+    if (!['President', 'Vice President', 'Secretary'].every((position) => positions.has(position))) {
+      db.run('ROLLBACK');
+      return { status: 'incomplete-ballot' };
+    }
 
     db.run(
       'UPDATE tokens SET is_used = 1 WHERE token_hash = ? AND is_used = 0',
@@ -277,15 +355,12 @@ export function castAnonymousVote(tokenHash, candidateIds) {
     }
 
     for (const candidateId of candidateIds) {
-      db.run(
-        'INSERT INTO votes (candidate_id, vote_weight) VALUES (?, ?)',
-        [candidateId, token.vote_weight]
-      );
+      db.run('INSERT INTO votes (candidate_id) VALUES (?)', [candidateId]);
     }
 
     db.run('COMMIT');
     saveDb(db);
-    return { status: 'recorded', voteWeight: token.vote_weight };
+    return { status: 'recorded' };
   } catch (error) {
     db.run('ROLLBACK');
     throw error;
@@ -298,9 +373,10 @@ export function performRollover() {
   const tokenCount = executeQueryOne('SELECT COUNT(*) as count FROM tokens')?.count || 0;
   const registryCount = executeQueryOne('SELECT COUNT(*) as count FROM voter_registry WHERE has_received_token = 1')?.count || 0;
 
+  dbInstance.run('DELETE FROM judge_scores');
   dbInstance.run('DELETE FROM votes');
   dbInstance.run('DELETE FROM tokens');
-  dbInstance.run('UPDATE voter_registry SET has_received_token = 0');
+  dbInstance.run('UPDATE voter_registry SET has_received_token = 0, is_registered = 0');
   saveDb(dbInstance);
 
   return { resetVotesCount: voteCount, resetTokensCount: tokenCount, resetRegistryCount: registryCount };

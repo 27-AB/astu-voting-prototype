@@ -168,6 +168,29 @@ input:focus { outline: 3px solid rgba(31, 63, 122, 0.3); border-color: var(--blu
 .authority-closed { text-align: center; }
 .authority-farewell { max-width: 600px; margin: 18px auto 28px; line-height: 1.7; }
 .authority-results { text-align: left; }
+.judge-proposal { display: grid; gap: 10px; }
+.score-editor { display: flex; align-items: center; gap: 12px; }
+.score-editor input { max-width: 120px; }
+.score-editor .btn { margin-top: 0; }
+.candidate-highlight {
+  display: grid;
+  gap: 8px;
+  margin: 20px 0;
+  padding: 16px;
+  background: #eef5ff;
+  border-left: 5px solid var(--blue);
+  border-radius: 6px;
+}
+.candidate-rankings { display: grid; gap: 10px; padding-left: 24px; }
+.candidate-rank {
+  display: grid;
+  gap: 6px;
+  padding: 14px;
+  border: 1px solid #e1e5ed;
+  border-radius: 8px;
+}
+.own-candidate { border-color: var(--gold); background: #fffaf0; }
+.score-summary { margin-top: 8px !important; font-weight: 700; }
 .result-row {
   display: grid;
   grid-template-columns: minmax(130px, 1fr) 2fr;

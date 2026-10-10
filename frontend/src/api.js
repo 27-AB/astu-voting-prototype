@@ -67,16 +67,16 @@ export async function login(ugr_id, password) {
       throw new Error("Invalid ID or password");
     save("ugr_id", ugr_id);
     save("student_token", "mock-jwt-" + ugr_id);
-    const student = { voter_type: "STANDARD", vote_weight: 1 };
+    const student = { voter_type: "STANDARD", is_candidate: false };
     save("voter_type", student.voter_type);
-    save("vote_weight", String(student.vote_weight));
+    save("is_candidate", "false");
     return { token: "mock-jwt-" + ugr_id, student };
   }
   const data = await request("/api/login", "POST", { ugr_id, password });
   save("student_token", data.token);
   save("student_name", data.student.name);
   save("voter_type", data.student.voter_type);
-  save("vote_weight", String(data.student.vote_weight));
+  save("is_candidate", String(data.student.is_candidate));
   return data;
 }
 
@@ -87,6 +87,10 @@ export async function getEligibility() {
     return { ...mockStudents[id], has_received_token: gotToken.has(id) };
   }
   return request("/api/eligibility", "GET", null, "student_token");
+}
+
+export async function registerForElection() {
+  return request("/api/election/register", "POST", null, "student_token");
 }
 
 export async function requestToken() {
@@ -108,7 +112,7 @@ export async function getCandidates() {
     await wait(200);
     return [...mockCandidates];
   }
-  return request("/api/candidates");
+  return request("/api/candidates", "GET", null, "student_token");
 }
 
 export async function castVote(token, candidateIds) {
@@ -141,6 +145,18 @@ export async function getFinalResults() {
   return request("/api/results", "GET", null, "student_token");
 }
 
+export async function getJudgeCandidates() {
+  return request("/api/judge/candidates", "GET", null, "student_token");
+}
+
+export async function submitJudgeScore(candidateId, score) {
+  return request(`/api/judge/scores/${candidateId}`, "PUT", { score }, "student_token");
+}
+
+export async function getCandidateDashboard() {
+  return request("/api/candidate/dashboard", "GET", null, "student_token");
+}
+
 export async function getAnnouncements() {
   if (USE_MOCK) {
     await wait(200);
@@ -149,6 +165,9 @@ export async function getAnnouncements() {
   return request("/api/announcements");
 }
 
+export async function getAdminJudgingResults() {
+  return request("/api/admin/judging-results", "GET", null, "admin_token");
+}
 // ---------- Admin functions ----------
 export async function adminLogin(username, password) {
   if (USE_MOCK) {

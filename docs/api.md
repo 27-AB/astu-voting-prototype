@@ -1,8 +1,7 @@
 
 # ASTU Voting System: API Contract
 
-This file is the agreement between Person A (backend) and Person B (frontend).
-Both sides follow it exactly. If anything changes, update this file FIRST, then tell the other person.
+This file documents the ASTU voting backend and frontend API contract.
 
 ---
 
@@ -37,10 +36,11 @@ Success (200):
     "ugr_id": "UGR/1234/15",
     "name": "Student Name",
     "voter_type": "AUTHORITY",
-    "vote_weight": 3
+    "is_candidate": false
   }
 }
 ```
+`AUTHORITY` identifies one of the two appointed proposal judges. Judges are not parliamentary voters and do not receive a ballot token.
 Error (401):
 ```json
 { "error": "Invalid ID or password" }
@@ -51,7 +51,13 @@ Needs login header. Tells the student if they can vote.
 
 Success, eligible (200):
 ```json
-{ "eligible": true, "reason": null, "has_received_token": false }
+{
+  "eligible": true,
+  "reason": null,
+  "has_received_token": false,
+  "parliament_member": true,
+  "registered_for_election": false
+}
 ```
 Success, not eligible (200):
 ```json
@@ -61,21 +67,16 @@ Possible reasons:
 - `"CGPA is below 3.0"`
 - `"No active cafeteria access"`
 - `"CGPA is below 3.0 and no active cafeteria access"`
+- `"Not on the approved parliament voter roster"`
 
 ### POST /api/token
-Needs login header. Creates ONE anonymous voting token. The plain token is shown only once.
+Needs login header. Creates one anonymous token for an eligible parliament voter who has explicitly registered. Judges and non-roster students are denied.
 
 Success (200):
 ```json
 { "token": "a8f3-92kd-xxxx-xxxx" }
 ```
-Errors:
-```json
-{ "error": "You are not eligible to vote" }
-```
-```json
-{ "error": "You have already received a token" }
-```
+Errors include a 403 for non-roster, ineligible, unregistered, or repeat token requests.
 
 ### GET /api/candidates
 Success (200):
@@ -90,9 +91,15 @@ Success (200):
   }
 ]
 ```
+After voting opens, only registered parliamentary voters may access this route. Candidate entries then include `judge_score` (the average of both judges' 0–20 scores), `judge_points` (up to 30), current `rank`, `parliament_votes`, `parliament_share` (up to 70), and `final_score`. The score fields are withheld before voting starts.
+
+### POST /api/election/register
+Requires student login and is only available before election start. The account must be among the configured 50–100 eligible parliament voter IDs. Registration is one account per eligible voter.
+
+Success (201): `{ "message": "You are registered as a parliamentary voter" }`.
 
 ### GET /api/election/status
-Returns election timing from the server clock. `phase` is `scheduled`, `open`, or `closed`.
+Returns election timing from the server clock. `phase` is `scheduled`, `open`, or `closed`. `judging_complete` is true only when both current judges have scored every candidate.
 
 Success (200):
 ```json
@@ -101,22 +108,23 @@ Success (200):
   "election_end_time": "2026-11-01T17:00:00Z",
   "server_time": "2026-11-01T09:00:01.000Z",
   "phase": "open",
-  "is_open": true
+  "is_open": true,
+  "judging_complete": true
 }
 ```
 
 Voting is denied with 403 before the start and at or after the end. If either timestamp is missing or invalid, status and voting return 503 (fail closed).
 
 ### POST /api/vote
-Does not need login. The token is the proof. The server reads the ballot's weight from its token record; any client-supplied weight is ignored.
+Does not need login. The single-use token is the proof. It must select exactly one candidate for each of President, Vice President, and Secretary. Each selection is one parliamentary vote.
 
 Request:
 ```json
-{ "token": "a8f3-92kd-xxxx-xxxx", "candidate_id": 1 }
+{ "token": "a8f3-92kd-xxxx-xxxx", "votes": [1, 3, 5] }
 ```
 Success (200):
 ```json
-{ "message": "Vote recorded", "vote_weight": 3 }
+{ "message": "Vote recorded" }
 ```
 Errors:
 ```json
@@ -133,21 +141,36 @@ Errors:
 ```
 
 ### GET /api/results
-Needs student login. Final results are only available once the server election clock reaches `election_end_time`.
+Public after the server election clock reaches `election_end_time`. Before close it returns 403. Final standings combine the judges' average (30 points maximum) and the candidate's share of parliament votes for that position (70 points maximum).
 
 Success (200):
 ```json
 {
   "election_end_time": "2026-11-01T17:00:00Z",
   "winners": [
-    { "candidate_id": 1, "name": "Candidate Name", "position": "President", "votes": 9 }
+    {
+      "candidate_id": 1,
+      "name": "Candidate Name",
+      "position": "President",
+      "judge_score": 18,
+      "judge_points": 27,
+      "parliament_votes": 30,
+      "parliament_share": 42,
+      "final_score": 69,
+      "rank": 1
+    }
   ],
-  "results": [
-    { "candidate_id": 1, "name": "Candidate Name", "position": "President", "votes": 9 }
-  ]
+  "results": ["all candidates with scores and position rank"]
 }
 ```
-`votes` is the sum of ballot weights. Each winner is the highest-weighted candidate for that position, with candidate ID as a deterministic tie-breaker.
+
+### Judge endpoints
+
+Student Affairs judges authenticate using normal student login.
+
+- `GET /api/judge/candidates`: list candidate proposals and the authenticated judge's own saved score.
+- `PUT /api/judge/scores/:candidateId` with `{ "score": 0 }` through `{ "score": 20 }`: save or revise a score until election end. Each judge must score every candidate before votes are accepted.
+- `GET /api/candidate/dashboard`: authenticated candidate's own and all candidates' current scores/ranks. The login account must be linked to a candidate profile by the admin.
 
 ### GET /api/announcements
 Success (200):
@@ -183,7 +206,7 @@ Add a candidate.
 
 Request:
 ```json
-{ "name": "...", "position": "President", "bio": "...", "manifesto": "..." }
+{ "name": "...", "position": "President", "bio": "...", "manifesto": "...", "student_ugr_id": "UGR/1234/15" }
 ```
 Success (201):
 ```json
@@ -216,13 +239,29 @@ Success (201):
 Success (200):
 ```json
 {
-  "turnout": { "votes_cast": 42, "eligible_voters": 80, "percent": 52.5 },
+  "turnout": { "votes_cast": 42, "eligible_voters": 75, "percent": 56 },
   "results": [
-    { "candidate_id": 1, "name": "Candidate Name", "position": "President", "votes": 26 }
+    {
+      "candidate_id": 1,
+      "name": "Candidate Name",
+      "position": "President",
+      "judge_score": 18,
+      "judge_points": 27,
+      "parliament_votes": 30,
+      "parliament_share": 42,
+      "final_score": 69,
+      "rank": 1
+    }
   ]
 }
 ```
-Results are weighted points, not a count of ballot submissions. `turnout.votes_cast` remains the number of spent tokens.
+`GET /api/admin/judging-results` returns individual judge scores to admins, including before election start. Public candidate ratings remain hidden until voting opens.
+
+### Election environment
+
+- `STUDENT_AFFAIRS_JUDGE_IDS`: exactly two distinct, registered judge accounts (Student Affairs President and Vice President).
+- `PARLIAMENT_VOTER_IDS`: 50–100 distinct registered, eligible non-judge UGR IDs.
+- `ELECTION_START_TIME` / `ELECTION_END_TIME`: timezone-qualified ISO-8601 timestamps.
 
 ### POST /api/admin/rollover
 Simulates a new academic year. No request body.
