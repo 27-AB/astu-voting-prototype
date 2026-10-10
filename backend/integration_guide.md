@@ -234,19 +234,20 @@ Run the backend tests from the `backend/` directory:
 ```bash
 npm test
 ```
-These tests verify the configured authority roster, server-derived weighted tallies, token replay rejection, and rollback of invalid ballots.
+These tests verify the two-judge roster, one-vote-per-selection parliament ballots, judge score limits, final 30/70 ranking calculation, token replay rejection, and invalid-ballot rollback.
 
 ---
 
-## 6. Authority weighted voting setup
+## 6. Judge and parliament voting setup
 
 The checked-in backend uses Express and `sql.js`/SQLite (not Prisma/PostgreSQL). Copy `.env.example` to `.env`, then configure:
 
-- `AUTHORITY_IDS`: exactly three comma-separated IDs that already exist in `registrar_students`. The application fails startup if the list has anything other than three distinct IDs or any ID is not registered.
+- `STUDENT_AFFAIRS_JUDGE_IDS`: exactly two comma-separated student IDs for the Student Affairs President and Vice President. Both must exist in `registrar_students`. The legacy `AUTHORITY_IDS` key is accepted as an alias but must also list exactly two IDs.
+- `PARLIAMENT_VOTER_IDS`: exactly 50–100 distinct registered, eligible non-judge IDs. Each must have CGPA above 3.00 and active cafeteria access.
 - `ELECTION_START_TIME` and `ELECTION_END_TIME`: timezone-qualified ISO-8601 timestamps, with the start earlier than the end. Voting fails closed when these values are missing or invalid.
 
-The backend migration adds `voter_type` (`STANDARD`/`AUTHORITY`) and `vote_weight` (1/3) to the roster, and adds vote weight to the anonymous token and ballot ledger. At startup, only the configured IDs are authority voters with weight 3; all other roster rows are reset to standard weight 1. The raw token is never linked to the voter, and the voting API derives weight from that token's database row inside the same transaction that consumes it and records the ballot.
+Judges login through the normal student login and are routed to `/judge`. They score every candidate proposal from 0–20 and can revise scores until election end. Voting is rejected until both judges score every candidate. Each eligible parliament member explicitly registers before election start, receives one hashed anonymous token, and casts one ballot selecting each of the three positions.
 
-Successful login includes `student.voter_type` and `student.vote_weight`. The frontend routes authority users to `/authority`, displays the three-point weight, loads candidate proposals and lets the elector submit one candidate per position. It polls the server election clock and, after closure, displays the final winners and the formal closing message. The API, not the browser timer, enforces the start/end boundary.
+Final ranks combine the average judge score scaled to 30 points with the candidate's per-position share of parliament votes scaled to 70 points. Judge ratings are available to admins before voting, registered parliament voters during voting, and candidates and the public after election close. Candidates are linked to their student login using `student_ugr_id` on each admin-created candidate record; their dashboard is `/candidate`.
 
-From `backend/`, run `npm test` to validate authority assignment, weighted counting, replay rejection, and rollback on invalid ballots.
+From `backend/`, run `npm test` to validate role assignment, score weighting, score validation, replay rejection, and rollback on invalid ballots.
