@@ -70,13 +70,17 @@ Possible reasons:
 - `"Not on the approved parliament voter roster"`
 
 ### POST /api/token
-Needs login header. Creates one anonymous token for an eligible parliament voter who has explicitly registered. Judges and non-roster students are denied.
+Needs login header. During voting, confirms that this eligible, registered parliament voter received their single-use token by email. It never returns the token itself. Judges, non-roster students, unregistered students, and voters whose token email has not been delivered are denied.
 
 Success (200):
 ```json
-{ "token": "a8f3-92kd-xxxx-xxxx" }
+{
+  "email_sent": true,
+  "message": "Your voting token was sent to your registered student email address."
+}
 ```
-Errors include a 403 for non-roster, ineligible, unregistered, or repeat token requests.
+
+The backend schedules cryptographically random token generation and email delivery for 12 hours before `ELECTION_START_TIME`. Token emails are sent to the address derived from the UGR ID and `STUDENT_EMAIL_DOMAIN`; failed SMTP deliveries are retried until voting starts. This endpoint confirms delivery but never returns the secret token.
 
 ### GET /api/candidates
 Success (200):
@@ -94,7 +98,7 @@ Success (200):
 After voting opens, only registered parliamentary voters may access this route. Candidate entries then include `judge_score` (the average of both judges' 0–20 scores), `judge_points` (up to 30), current `rank`, `parliament_votes`, `parliament_share` (up to 70), and `final_score`. The score fields are withheld before voting starts.
 
 ### POST /api/election/register
-Requires student login and is only available before election start. The account must be among the configured 50–100 eligible parliament voter IDs. Registration is one account per eligible voter.
+Requires student login and is only available before `registration_deadline` (12 hours before election start). The account must be among the configured 50–100 eligible parliament voter IDs. Registration is one account per eligible voter.
 
 Success (201): `{ "message": "You are registered as a parliamentary voter" }`.
 
@@ -106,6 +110,8 @@ Success (200):
 {
   "election_start_time": "2026-11-01T09:00:00Z",
   "election_end_time": "2026-11-01T17:00:00Z",
+  "registration_deadline": "2026-10-31T21:00:00.000Z",
+  "registration_open": false,
   "server_time": "2026-11-01T09:00:01.000Z",
   "phase": "open",
   "is_open": true,
@@ -262,13 +268,16 @@ Success (200):
 - `STUDENT_AFFAIRS_JUDGE_IDS`: exactly two distinct, registered judge accounts (Student Affairs President and Vice President).
 - `PARLIAMENT_VOTER_IDS`: 50–100 distinct registered, eligible non-judge UGR IDs.
 - `ELECTION_START_TIME` / `ELECTION_END_TIME`: timezone-qualified ISO-8601 timestamps.
+- `STUDENT_EMAIL_DOMAIN`: domain appended to normalized UGR IDs, e.g. `astu.edu.et` (`UGR/0001/15` becomes `ugr-0001-15@astu.edu.et`).
+- `SMTP_HOST`, `SMTP_PORT`, `SMTP_SECURE`, `SMTP_USER`, `SMTP_PASS`, and `SMTP_FROM`: backend SMTP delivery settings.
+- `VOTING_TOKEN_SECRET`: stable, private secret of at least 32 random bytes used to derive tokens without storing raw token values.
 
 ### POST /api/admin/rollover
 Simulates a new academic year. No request body.
 
 Success (200):
 ```json
-{ "message": "New academic year started. Registry, tokens and votes reset." }
+{ "message": "New academic year started. Registry, tokens, email deliveries and votes reset." }
 ```
 
 ---

@@ -11,9 +11,23 @@ import {
   executeRun,
   castAnonymousVote,
   getConfiguredParliamentIds,
+  hasTokenEmailDeliveryRecord,
+  createPendingTokenEmailDelivery,
+  getPendingTokenEmailDeliveries,
+  isTokenEmailDelivered,
+  recordTokenEmailAttempt,
+  markTokenEmailDelivered,
+  discardPendingTokenEmailDeliveries,
   getCandidateRankings,
   performRollover
 } from './db.js';
+import {
+  createSmtpTransport,
+  decryptPendingToken,
+  encryptPendingToken,
+  generateVotingToken,
+  getStudentEmailAddress
+} from './token-email.js';
 
 // ---------- Types ----------
 interface StudentRecord {
@@ -50,6 +64,8 @@ interface AdminUserRecord {
 const app = express();
 const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : 3000;
 const SESSION_TTL_MS = 2 * 60 * 60 * 1000; // 2 hours
+const TOKEN_EMAIL_LEAD_MS = 12 * 60 * 60 * 1000;
+const TOKEN_EMAIL_RETRY_MS = 60 * 1000;
 const WINNING_POSITIONS = ['President', 'Vice President', 'Secretary'];
 
 function getElectionWindow() {
@@ -94,6 +110,8 @@ function getElectionPhase() {
   return {
     election_start_time: window.start,
     election_end_time: window.end,
+    registration_deadline: new Date(window.startMs - TOKEN_EMAIL_LEAD_MS).toISOString(),
+    registration_open: now < window.startMs - TOKEN_EMAIL_LEAD_MS,
     server_time: new Date(now).toISOString(),
     phase: now < window.startMs ? 'scheduled' : now < window.endMs ? 'open' : 'closed',
     is_open: now >= window.startMs && now < window.endMs,
@@ -316,8 +334,8 @@ app.post('/api/election/register', requireStudentAuth, rateLimiter(5, 60000), (r
     res.status(503).json({ error: 'Election schedule is not configured correctly' });
     return;
   }
-  if (phase.phase !== 'scheduled') {
-    res.status(403).json({ error: 'Voter registration has closed' });
+  if (phase.phase !== 'scheduled' || !phase.registration_open) {
+    res.status(403).json({ error: 'Parliament voter registration closes 12 hours before the election starts' });
     return;
   }
 
@@ -362,8 +380,8 @@ app.post('/api/token', requireStudentAuth, rateLimiter(5, 60000), (req: Request,
     res.status(503).json({ error: 'Election schedule is not configured correctly' });
     return;
   }
-  if (phase.phase !== 'open' || !phase.judging_complete) {
-    res.status(403).json({ error: 'Voting tokens are issued only while voting is open and judging is complete' });
+  if (phase.phase !== 'open') {
+    res.status(403).json({ error: 'Voting tokens are available only during the election' });
     return;
   }
   const ugr_id = (req as any).studentUgrId as string;
@@ -388,7 +406,7 @@ app.post('/api/token', requireStudentAuth, rateLimiter(5, 60000), (req: Request,
     return;
   }
 
-  // Make sure a registry row exists so the "already received" flag always works
+  // Ensure the participant has a registry row before checking registration and delivery.
   executeRun('INSERT OR IGNORE INTO voter_registry (ugr_id, has_received_token) VALUES (?, 0)', [ugr_id]);
   const registry = executeQueryOne<{ has_received_token: number; is_registered: number }>(
     'SELECT has_received_token, is_registered FROM voter_registry WHERE ugr_id = ?',
@@ -401,29 +419,19 @@ app.post('/api/token', requireStudentAuth, rateLimiter(5, 60000), (req: Request,
   }
 
   if (registry?.is_registered !== 1) {
-    res.status(403).json({ error: 'Register as an eligible parliamentary voter before requesting a ballot' });
+    res.status(403).json({ error: 'Register as an eligible parliamentary voter before requesting a ballot token' });
     return;
   }
-  if (registry?.has_received_token === 1) {
-    res.status(403).json({ error: 'You have already received a token' });
+  const electionWindow = getElectionWindow();
+  if (!electionWindow || !isTokenEmailDelivered(electionWindow.start, ugr_id)) {
+    res.status(503).json({ error: 'Your voting token email has not been delivered yet. Contact the election administrator if voting is open.' });
     return;
   }
 
-  // Mark as claimed FIRST so a crash or double click can never issue two tokens
-  executeRun('UPDATE voter_registry SET has_received_token = 1 WHERE ugr_id = ?', [ugr_id]);
-
-  // 128-bit random token, e.g. 7F89-A21B-4C90-D3E1-....
-  const hex = crypto.randomBytes(16).toString('hex').toUpperCase();
-  const rawToken = hex.match(/.{4}/g)!.join('-');
-  const tokenHash = crypto.createHash('sha256').update(rawToken).digest('hex');
-
-  // Only the hash is stored, with NO link to the student
-  executeRun(
-    'INSERT INTO tokens (token_hash, is_used) VALUES (?, 0)',
-    [tokenHash]
-  );
-
-  res.json({ token: rawToken });
+  res.json({
+    email_sent: true,
+    message: 'Your voting token was sent to your registered student email address.'
+  });
 });
 
 // ==========================================
@@ -873,15 +881,186 @@ app.get('/api/results', (_req: Request, res: Response) => {
 app.post('/api/admin/rollover', requireAdminAuth, (_req: Request, res: Response) => {
   try {
     performRollover();
-    res.json({ message: 'New academic year started. Registry, tokens and votes reset.' });
+    res.json({ message: 'New academic year started. Registry, tokens, email deliveries and votes reset.' });
   } catch (err: any) {
     res.status(500).json({ error: 'Rollover failed: ' + err.message });
   }
 });
 
+// ---------- Scheduled token email delivery ----------
+let tokenEmailRetryTimer: ReturnType<typeof setInterval> | undefined;
+let tokenEmailDispatchInProgress = false;
+let tokenEmailDeliveriesComplete = false;
+
+function invalidateUndeliveredTokenEmails(electionStartTime: string) {
+  try {
+    const discarded = discardPendingTokenEmailDeliveries(electionStartTime);
+    if (discarded > 0) {
+      console.error(`[Token email] ${discarded} undelivered token(s) were invalidated at election start.`);
+    }
+  } catch (error) {
+    console.error('[Token email] Could not invalidate pending tokens at election start:', error);
+  }
+}
+
+function getRegisteredTokenEmailRecipients() {
+  const voterIds = getConfiguredParliamentIds();
+  const placeholders = voterIds.map(() => '?').join(', ');
+  const eligibleIds = executeQuery<{ ugr_id: string }>(
+    `SELECT s.ugr_id
+     FROM registrar_students s
+     JOIN cafeteria_records c ON c.ugr_id = s.ugr_id
+     WHERE UPPER(s.ugr_id) IN (${placeholders})
+       AND s.voter_type = 'STANDARD'
+       AND s.cgpa > 3
+       AND c.is_active = 1`,
+    voterIds
+  );
+  if (eligibleIds.length !== voterIds.length) {
+    throw new Error('Parliament roster must contain only registered, eligible non-judge voters.');
+  }
+  const registeredIds = executeQuery<{ ugr_id: string }>(
+    `SELECT ugr_id FROM voter_registry
+     WHERE is_registered = 1 AND UPPER(ugr_id) IN (${placeholders})`,
+    voterIds
+  );
+  return registeredIds.map((row) => row.ugr_id);
+}
+
+async function dispatchScheduledTokenEmails(electionStartTime: string, electionStartMs: number) {
+  if (tokenEmailDispatchInProgress) return;
+  if (Date.now() >= electionStartMs) {
+    console.error('[Token email] Election start reached before all scheduled token emails were delivered.');
+    return;
+  }
+  tokenEmailDispatchInProgress = true;
+  let transporter: ReturnType<typeof createSmtpTransport>['transporter'] | undefined;
+  try {
+    const secret = process.env.VOTING_TOKEN_SECRET || '';
+    encryptPendingToken(secret, 'configuration-check');
+    getStudentEmailAddress('UGR/0001/15');
+    const smtp = createSmtpTransport();
+    transporter = smtp.transporter;
+
+    const voterIds = getRegisteredTokenEmailRecipients();
+    for (const voterId of voterIds) {
+      if (hasTokenEmailDeliveryRecord(electionStartTime, voterId)) continue;
+      const rawToken = generateVotingToken();
+      const encryptedToken = encryptPendingToken(secret, rawToken);
+      const tokenHash = crypto.createHash('sha256').update(rawToken).digest('hex');
+      createPendingTokenEmailDelivery(electionStartTime, voterId, tokenHash, encryptedToken);
+    }
+    if (voterIds.length === 0) {
+      console.warn('[Token email] No eligible parliament voters had registered by the registration deadline.');
+      tokenEmailDeliveriesComplete = true;
+      return;
+    }
+
+    const pendingDeliveries = getPendingTokenEmailDeliveries(electionStartTime);
+    for (const delivery of pendingDeliveries) {
+      if (Date.now() >= electionStartMs) {
+        console.error('[Token email] Stopping delivery because the election has started.');
+        break;
+      }
+      const rawToken = decryptPendingToken(secret, delivery);
+      const tokenHash = crypto.createHash('sha256').update(rawToken).digest('hex');
+      if (!crypto.timingSafeEqual(Buffer.from(tokenHash, 'hex'), Buffer.from(delivery.token_hash, 'hex'))) {
+        throw new Error(`Pending token integrity check failed for ${delivery.voter_ugr_id}.`);
+      }
+      const recipient = getStudentEmailAddress(delivery.voter_ugr_id);
+      try {
+        await transporter.sendMail({
+          from: smtp.from,
+          to: recipient,
+          subject: 'Your ASTU Student Union Election Voting Token',
+          text: [
+            `Your single-use ASTU parliamentary voting token is: ${rawToken}`,
+            '',
+            'Keep this token secret. Enter it on the election ballot page during the voting period.',
+            'It can be used once to select one candidate for President, Vice President, and Secretary.'
+          ].join('\n')
+        });
+        recordTokenEmailAttempt(electionStartTime, delivery.voter_ugr_id);
+        markTokenEmailDelivered(electionStartTime, delivery.voter_ugr_id);
+        console.log(`[Token email] Delivered voting token to ${recipient}.`);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : 'Unknown SMTP delivery error';
+        recordTokenEmailAttempt(electionStartTime, delivery.voter_ugr_id, message);
+        console.error(`[Token email] Delivery failed for ${delivery.voter_ugr_id}; it will be retried: ${message}`);
+      }
+    }
+    tokenEmailDeliveriesComplete = getPendingTokenEmailDeliveries(electionStartTime).length === 0;
+  } catch (error) {
+    console.error('[Token email] Scheduled delivery could not run; it will be retried:', error);
+  } finally {
+    transporter?.close();
+    tokenEmailDispatchInProgress = false;
+    if (Date.now() >= electionStartMs) {
+      if (tokenEmailRetryTimer) clearInterval(tokenEmailRetryTimer);
+      tokenEmailRetryTimer = undefined;
+      invalidateUndeliveredTokenEmails(electionStartTime);
+    }
+  }
+}
+
+function startTokenEmailScheduler() {
+  const electionWindow = getElectionWindow();
+  if (!electionWindow) {
+    console.error('[Token email] Scheduler not started because the election schedule is invalid.');
+    return;
+  }
+
+  const dispatchTime = electionWindow.startMs - TOKEN_EMAIL_LEAD_MS;
+  const now = Date.now();
+  if (now >= electionWindow.startMs) {
+    if (now >= dispatchTime) {
+      console.error('[Token email] Server started after the election began; missed token emails will not be sent late.');
+      invalidateUndeliveredTokenEmails(electionWindow.start);
+    }
+    return;
+  }
+
+  const retryPending = () => {
+    if (tokenEmailDeliveriesComplete) {
+      if (tokenEmailRetryTimer) clearInterval(tokenEmailRetryTimer);
+      tokenEmailRetryTimer = undefined;
+      return;
+    }
+    if (Date.now() >= electionWindow.startMs) {
+      if (tokenEmailDispatchInProgress) return;
+      if (tokenEmailRetryTimer) clearInterval(tokenEmailRetryTimer);
+      tokenEmailRetryTimer = undefined;
+      invalidateUndeliveredTokenEmails(electionWindow.start);
+      return;
+    }
+    void dispatchScheduledTokenEmails(electionWindow.start, electionWindow.startMs);
+  };
+
+  if (now >= dispatchTime) {
+    retryPending();
+    tokenEmailRetryTimer = setInterval(retryPending, TOKEN_EMAIL_RETRY_MS);
+    return;
+  }
+
+  const scheduleUntilDispatch = () => {
+    const remaining = dispatchTime - Date.now();
+    if (remaining <= 0) {
+      retryPending();
+      tokenEmailRetryTimer = setInterval(retryPending, TOKEN_EMAIL_RETRY_MS);
+      return;
+    }
+    setTimeout(
+      scheduleUntilDispatch,
+      Math.min(remaining, 2_147_000_000)
+    );
+  };
+  scheduleUntilDispatch();
+}
+
 // ---------- Start ----------
 async function startServer() {
   await getDb();
+  startTokenEmailScheduler();
   app.listen(PORT, '0.0.0.0', () => {
     console.log(`[ASTU Voting Backend] Running on port ${PORT}`);
   });

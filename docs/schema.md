@@ -14,8 +14,8 @@ At no point can any administrative entity, database administrator, or network ob
 ### The Three Isolated Domains:
 1. **Identity & Eligibility Domain:** `registrar_students` + `cafeteria_records`  
    Holds student academic credentials and campus residency status.
-2. **Token Issuance Domain:** `voter_registry`  
-   Tracks *whether* an eligible student has claimed their one-time ballot token (`has_received_token = 1`), but **never stores the token or token hash**.
+2. **Token Delivery Domain:** `voter_registry` + `token_email_deliveries`
+   Tracks explicit registration and email delivery status. The delivery queue temporarily stores an encrypted token and its hash only while SMTP delivery is pending; these fields are erased when delivery succeeds or the election starts.
 3. **Ballot Box Domain:** `tokens` + `votes`  
    - `tokens` stores only the SHA-256 hash of tokens without any user references.
    - `votes` stores candidate selections, one row per selected candidate. There is **no student ID, no token hash, and no fine-grained timestamp** in the votes table.
@@ -32,11 +32,17 @@ At no point can any administrative entity, database administrator, or network ob
 |    (ugr_id, is_active)   |
 +------------+-------------+
              |
-             v  [Token Claimed]
+             v  [Registered and email delivery status]
 +------------+-------------+           [Cryptographic Air-Gap]
 |     voter_registry       | = = = = = = = = = = = = = = = = = = = => [Student receives raw token]
 | (ugr_id, has_received)   |                                                     |
 +--------------------------+                                                     |
+             |                                                                   |
+             v                                                                   |
+ +--------------------------+                                                    |
+ | token_email_deliveries   |                                                    |
+ | (voter ID, send status)  |                                                    |
+ +--------------------------+                                                    |
                                                                                  v
                                                 +------------------+     +---------------+
                                                 |      tokens      |     |     votes     |
@@ -78,23 +84,41 @@ Tracks election participation status per academic year without linking to cast b
 ```sql
 CREATE TABLE voter_registry (
     ugr_id TEXT PRIMARY KEY,
-    has_received_token INTEGER NOT NULL DEFAULT 0, -- 1 = Token already claimed, 0 = Not claimed
+    has_received_token INTEGER NOT NULL DEFAULT 0, -- 1 = Token email delivered, 0 = Not delivered
     is_registered INTEGER NOT NULL DEFAULT 0,       -- Explicit parliament voter registration
     FOREIGN KEY (ugr_id) REFERENCES registrar_students(ugr_id)
 );
 ```
 
-### 4. `tokens`
+### 4. `token_email_deliveries`
+Durable retry state for scheduled email delivery. This table stores retry metadata. While delivery is pending, it temporarily holds an encrypted raw token and its hash; both are cleared after successful delivery or invalidated at election start.
+```sql
+CREATE TABLE token_email_deliveries (
+    election_start_time TEXT NOT NULL,
+    voter_ugr_id TEXT NOT NULL REFERENCES registrar_students(ugr_id),
+    status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'sent')),
+    attempts INTEGER NOT NULL DEFAULT 0,
+    last_error TEXT,
+    mailed_at TEXT,
+    token_hash TEXT,                      -- Cleared after successful delivery
+    token_ciphertext TEXT,                -- AES-256-GCM encrypted, cleared after delivery
+    token_iv TEXT,
+    token_auth_tag TEXT,
+    PRIMARY KEY (election_start_time, voter_ugr_id)
+);
+```
+
+### 5. `tokens`
 Stores one-way cryptographic hashes of generated voting tokens.
 ```sql
 CREATE TABLE tokens (
-    token_hash TEXT PRIMARY KEY,          -- SHA-256 hash of the 128-bit random token
+    token_hash TEXT PRIMARY KEY,          -- SHA-256 hash of the 128-bit token
     is_used INTEGER NOT NULL DEFAULT 0    -- 0 = Valid / Unspent, 1 = Expended / Voted
 );
 ```
-*Note:* No student identifier exists in this table. When a student generates a token, the server computes `SHA256(raw_token)`, inserts `token_hash`, and immediately gives `raw_token` to the student. The server discards `raw_token` from memory.
+*Note:* No student identifier exists in this table. Twelve hours before election start, the backend generates a random 128-bit token, computes `SHA256(raw_token)`, and emails the raw token. Until SMTP accepts the email, an AES-256-GCM encrypted retry copy and its hash are held in `token_email_deliveries`; both are erased from that voter-specific queue after successful delivery. The token table retains only the hash, with no voter reference.
 
-### 5. `candidates`
+### 6. `candidates`
 Nominated student leaders running for union leadership.
 ```sql
 CREATE TABLE candidates (
@@ -121,7 +145,7 @@ CREATE TABLE judge_scores (
 );
 ```
 
-### 6. `votes`
+### 7. `votes`
 The digital ballot box.
 ```sql
 CREATE TABLE votes (
@@ -136,7 +160,7 @@ CREATE TABLE votes (
 - NO timestamp column (prevents timing correlation with token claim or request logs).
 - Each candidate selection is stored as one unweighted vote row. Historical databases may retain unused `vote_weight` columns from the earlier prototype; current vote and ranking logic ignores them.
 
-### 7. `announcements`
+### 8. `announcements`
 Broadcast updates from the ASTU Electoral Board.
 ```sql
 CREATE TABLE announcements (
@@ -147,7 +171,7 @@ CREATE TABLE announcements (
 );
 ```
 
-### 8. `admin_users`
+### 9. `admin_users`
 Authorized electoral committee officers.
 ```sql
 CREATE TABLE admin_users (
@@ -161,7 +185,7 @@ CREATE TABLE admin_users (
 
 This repository uses Express with `sql.js` and SQLite. The two Student Affairs officeholders configured by `STUDENT_AFFAIRS_JUDGE_IDS` (legacy `AUTHORITY_IDS` is accepted as an alias) are judges, not weighted voters. Their student records are marked `AUTHORITY`; the judges cannot register for parliament voting or request a ballot. Configure exactly two distinct, registered IDs.
 
-`PARLIAMENT_VOTER_IDS` is the authoritative allowlist and must contain 50–100 distinct, registered, eligible non-judge voter IDs. Each voter must explicitly register before election start. Registration and the one-time token claim are recorded in `voter_registry`; the token itself is hashed and unlinked from the voter. Every valid parliamentary ballot selects exactly one candidate for each of President, Vice President, and Secretary. Each selection counts as one vote.
+`PARLIAMENT_VOTER_IDS` is the authoritative allowlist and must contain 50–100 distinct, registered, eligible non-judge voter IDs. Each voter must explicitly register before the deadline 12 hours before election start. At that deadline, the backend queues registered voters for email token delivery; delivery state is tracked separately from the anonymous token hash. The token itself is hashed and unlinked from the voter in the ballot tables. Every valid parliamentary ballot selects exactly one candidate for each of President, Vice President, and Secretary. Each selection counts as one vote.
 
 `judge_scores` stores one integer score from 0 through 20 for each judge/candidate pair. Judges may revise their scores until election end. All judges must score every candidate before a ballot is accepted. The average judge score contributes up to 30 points: `average / 20 * 30`. Parliamentary share contributes up to 70 points: `candidate votes / all votes cast for that position * 70`. The final ranking is the sum of those components, sorted within each position with candidate ID as a deterministic tie-breaker.
 

@@ -44,6 +44,7 @@ const mockStudents = {
   "UGR/0005/15": { eligible: false, reason: "CGPA is below 3.0" },
 };
 const gotToken = new Set(); // students who already took a token
+const mockVoterTokens = new Map();
 const issuedTokens = new Set(); // tokens that can still vote
 const usedTokens = new Set();
 
@@ -93,16 +94,17 @@ export async function registerForElection() {
   return request("/api/election/register", "POST", null, "student_token");
 }
 
-export async function requestToken() {
+export async function checkTokenEmailDelivery() {
   if (USE_MOCK) {
     await wait();
     const id = getSaved("ugr_id");
     if (!mockStudents[id].eligible) throw new Error("You are not eligible to vote");
-    if (gotToken.has(id)) throw new Error("You have already received a token");
+    if (gotToken.has(id)) return { email_sent: true, demo_token: mockVoterTokens.get(id) };
     gotToken.add(id);
     const token = Math.random().toString(36).slice(2, 6) + "-" + Math.random().toString(36).slice(2, 6) + "-" + Math.random().toString(36).slice(2, 6);
     issuedTokens.add(token);
-    return { token };
+    mockVoterTokens.set(id, token);
+    return { email_sent: true, demo_token: token };
   }
   return request("/api/token", "POST", null, "student_token");
 }

@@ -114,6 +114,21 @@ function initializeTables(db) {
       FOREIGN KEY (ugr_id) REFERENCES registrar_students(ugr_id)
     );
 
+    CREATE TABLE IF NOT EXISTS token_email_deliveries (
+      election_start_time TEXT NOT NULL,
+      voter_ugr_id TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'sent')),
+      attempts INTEGER NOT NULL DEFAULT 0,
+      last_error TEXT,
+      mailed_at TEXT,
+      token_hash TEXT,
+      token_ciphertext TEXT,
+      token_iv TEXT,
+      token_auth_tag TEXT,
+      PRIMARY KEY (election_start_time, voter_ugr_id),
+      FOREIGN KEY (voter_ugr_id) REFERENCES registrar_students(ugr_id)
+    );
+
     CREATE TABLE IF NOT EXISTS tokens (
       token_hash TEXT PRIMARY KEY,
       is_used INTEGER NOT NULL DEFAULT 0
@@ -164,6 +179,10 @@ function initializeTables(db) {
   addColumnIfMissing(db, 'registrar_students', 'voter_type', "TEXT NOT NULL DEFAULT 'STANDARD' CHECK (voter_type IN ('STANDARD', 'AUTHORITY'))");
   addColumnIfMissing(db, 'voter_registry', 'is_registered', 'INTEGER NOT NULL DEFAULT 0 CHECK (is_registered IN (0, 1))');
   addColumnIfMissing(db, 'candidates', 'student_ugr_id', 'TEXT REFERENCES registrar_students(ugr_id)');
+  addColumnIfMissing(db, 'token_email_deliveries', 'token_hash', 'TEXT');
+  addColumnIfMissing(db, 'token_email_deliveries', 'token_ciphertext', 'TEXT');
+  addColumnIfMissing(db, 'token_email_deliveries', 'token_iv', 'TEXT');
+  addColumnIfMissing(db, 'token_email_deliveries', 'token_auth_tag', 'TEXT');
 }
 
 function applyAuthorityConfiguration(db) {
@@ -189,6 +208,121 @@ function applyAuthorityConfiguration(db) {
 
 export function getConfiguredParliamentIds() {
   return configuredParliamentIds();
+}
+
+export function hasTokenEmailDeliveryRecord(electionStartTime, voterId) {
+  return Boolean(executeQueryOne(
+    `SELECT 1 FROM token_email_deliveries
+     WHERE election_start_time = ? AND voter_ugr_id = ?`,
+    [electionStartTime, voterId]
+  ));
+}
+
+export function createPendingTokenEmailDelivery(electionStartTime, voterId, tokenHash, encryptedToken) {
+  if (!dbInstance) throw new Error('Database not initialized');
+  const db = dbInstance;
+  db.run('BEGIN IMMEDIATE TRANSACTION');
+  try {
+    db.run(
+      `INSERT OR IGNORE INTO token_email_deliveries
+       (election_start_time, voter_ugr_id, token_hash, token_ciphertext, token_iv, token_auth_tag)
+       VALUES (?, ?, ?, ?, ?, ?)`,
+      [
+        electionStartTime,
+        voterId,
+        tokenHash,
+        encryptedToken.ciphertext,
+        encryptedToken.iv,
+        encryptedToken.authTag
+      ]
+    );
+    if (db.getRowsModified() !== 1) {
+      db.run('ROLLBACK');
+      return false;
+    }
+    db.run('INSERT OR IGNORE INTO tokens (token_hash, is_used) VALUES (?, 0)', [tokenHash]);
+    db.run('COMMIT');
+    saveDb(db);
+    return true;
+  } catch (error) {
+    db.run('ROLLBACK');
+    throw error;
+  }
+}
+
+export function getPendingTokenEmailDeliveries(electionStartTime) {
+  return executeQuery(
+    `SELECT voter_ugr_id, attempts, token_hash, token_ciphertext AS ciphertext,
+            token_iv AS iv, token_auth_tag AS auth_tag
+     FROM token_email_deliveries
+     WHERE election_start_time = ? AND status = 'pending'
+     ORDER BY voter_ugr_id`,
+    [electionStartTime]
+  );
+}
+
+export function isTokenEmailDelivered(electionStartTime, voterId) {
+  return Boolean(executeQueryOne(
+    `SELECT 1 FROM token_email_deliveries
+     WHERE election_start_time = ? AND voter_ugr_id = ? AND status = 'sent'`,
+    [electionStartTime, voterId]
+  ));
+}
+
+export function recordTokenEmailAttempt(electionStartTime, voterId, errorMessage = null) {
+  if (!dbInstance) throw new Error('Database not initialized');
+  dbInstance.run(
+    `UPDATE token_email_deliveries
+     SET attempts = attempts + 1, last_error = ?
+     WHERE election_start_time = ? AND voter_ugr_id = ? AND status = 'pending'`,
+    [errorMessage, electionStartTime, voterId]
+  );
+  saveDb(dbInstance);
+}
+
+export function markTokenEmailDelivered(electionStartTime, voterId) {
+  if (!dbInstance) throw new Error('Database not initialized');
+  dbInstance.run(
+    `UPDATE token_email_deliveries
+     SET status = 'sent', last_error = NULL, mailed_at = CURRENT_TIMESTAMP,
+         token_hash = NULL, token_ciphertext = NULL, token_iv = NULL, token_auth_tag = NULL
+     WHERE election_start_time = ? AND voter_ugr_id = ? AND status = 'pending'`,
+    [electionStartTime, voterId]
+  );
+  dbInstance.run(
+    'UPDATE voter_registry SET has_received_token = 1 WHERE ugr_id = ? AND is_registered = 1',
+    [voterId]
+  );
+  saveDb(dbInstance);
+}
+
+export function discardPendingTokenEmailDeliveries(electionStartTime) {
+  if (!dbInstance) throw new Error('Database not initialized');
+  const db = dbInstance;
+  db.run('BEGIN IMMEDIATE TRANSACTION');
+  try {
+    const pending = executeQuery(
+      `SELECT voter_ugr_id, token_hash FROM token_email_deliveries
+       WHERE election_start_time = ? AND status = 'pending'`,
+      [electionStartTime]
+    );
+    for (const delivery of pending) {
+      if (delivery.token_hash) {
+        db.run('DELETE FROM tokens WHERE token_hash = ? AND is_used = 0', [delivery.token_hash]);
+      }
+    }
+    db.run(
+      `DELETE FROM token_email_deliveries
+       WHERE election_start_time = ? AND status = 'pending'`,
+      [electionStartTime]
+    );
+    db.run('COMMIT');
+    saveDb(db);
+    return pending.length;
+  } catch (error) {
+    db.run('ROLLBACK');
+    throw error;
+  }
 }
 
 function seedIfEmpty(db) {
@@ -376,6 +510,7 @@ export function performRollover() {
   dbInstance.run('DELETE FROM judge_scores');
   dbInstance.run('DELETE FROM votes');
   dbInstance.run('DELETE FROM tokens');
+  dbInstance.run('DELETE FROM token_email_deliveries');
   dbInstance.run('UPDATE voter_registry SET has_received_token = 0, is_registered = 0');
   saveDb(dbInstance);
 

@@ -85,25 +85,29 @@ export default function Eligibility() {
           {!result.parliament_member ? (
             <p>Your account is not on the approved parliament voter roster.</p>
           ) : !result.registered_for_election ? (
-            <>
-              <p>Register for this election to confirm your participation.</p>
-              <button className="btn" onClick={handleRegistration} disabled={registering}>
-                {registering ? "Registering..." : "Register as a voter"}
-              </button>
-            </>
+            election?.registration_open ? (
+              <>
+                <p>Register for this election before registration closes 12 hours before voting begins.</p>
+                <button className="btn" onClick={handleRegistration} disabled={registering}>
+                  {registering ? "Registering..." : "Register as a voter"}
+                </button>
+              </>
+            ) : (
+              <p>Registration is closed. It ends 12 hours before voting begins.</p>
+            )
           ) : result.has_received_token ? (
-            <p>You already received your one-time voting token. Continue to the ballot page.</p>
+            <p>Your one-time token was sent to your registered student email. Enter it on the ballot page.</p>
           ) : election?.phase !== "open" ? (
-            <p>You are registered. Token requests open when the election begins.</p>
+            <p>You are registered. Your voting token will be emailed 12 hours before the election starts.</p>
           ) : (
-            <p>Get your anonymous voting token. It is shown only once.</p>
+            <p>Check your registered student email for your token. You can check delivery status below.</p>
           )}
           {result.parliament_member && result.registered_for_election && (result.has_received_token || election?.phase === "open") && (
             <button
               className="btn"
               onClick={() => navigate(result.has_received_token ? "/ballot" : "/token")}
             >
-              {result.has_received_token ? "Go to ballot" : "Get my voting token"}
+              {result.has_received_token ? "Go to ballot" : "Check token email"}
             </button>
           )}
           {error && <p className="error" role="alert">{error}</p>}

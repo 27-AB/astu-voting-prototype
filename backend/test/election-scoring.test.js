@@ -9,15 +9,19 @@ import { pathToFileURL } from 'node:url';
 const originalCwd = process.cwd();
 const tempDirectory = fs.mkdtempSync(path.join(os.tmpdir(), 'astu-election-scoring-'));
 let db;
+let tokenEmail;
 
 before(async () => {
   process.chdir(tempDirectory);
   process.env.STUDENT_AFFAIRS_JUDGE_IDS = 'UGR/0001/15,UGR/0002/15';
+  process.env.VOTING_TOKEN_SECRET = 'a'.repeat(64);
+  process.env.STUDENT_EMAIL_DOMAIN = 'astu.edu.et';
   process.env.PARLIAMENT_VOTER_IDS = Array.from({ length: 50 }, (_, index) =>
     `UGR/${String(index + 1).padStart(4, '0')}/15`
   ).join(',');
   db = await import(pathToFileURL(path.resolve(originalCwd, 'db.js')).href);
   await db.getDb();
+  tokenEmail = await import(pathToFileURL(path.resolve(originalCwd, 'token-email.js')).href);
 });
 
 after(() => {
@@ -141,4 +145,113 @@ test('final ranking combines the judge average at 30 percent and parliamentary v
   assert.equal(secondRanked.parliament_share, 23.33);
   assert.equal(secondRanked.final_score, 23.33);
   assert.equal(secondRanked.rank, 2);
+});
+
+test('scheduled voting tokens are cryptographically random and encrypted retries round-trip', () => {
+  const firstToken = tokenEmail.generateVotingToken();
+  const secondToken = tokenEmail.generateVotingToken();
+  assert.match(firstToken, /^[A-F0-9]{4}(?:-[A-F0-9]{4}){7}$/);
+  assert.notEqual(firstToken, secondToken);
+  const encrypted = tokenEmail.encryptPendingToken(process.env.VOTING_TOKEN_SECRET, firstToken);
+  assert.equal(tokenEmail.decryptPendingToken(process.env.VOTING_TOKEN_SECRET, {
+    iv: encrypted.iv,
+    ciphertext: encrypted.ciphertext,
+    auth_tag: encrypted.authTag
+  }), firstToken);
+  assert.throws(() => tokenEmail.decryptPendingToken(process.env.VOTING_TOKEN_SECRET, {
+    ...encrypted,
+    auth_tag: '00'.repeat(16)
+  }));
+  assert.equal(
+    tokenEmail.getStudentEmailAddress('UGR/0003/15'),
+    'ugr-0003-15@astu.edu.et'
+  );
+  assert.throws(
+    () => tokenEmail.encryptPendingToken('short', firstToken),
+    /at least 32 bytes/
+  );
+  assert.throws(
+    () => tokenEmail.getStudentEmailAddress('UGR/0003/15', 'not a domain'),
+    /valid email domain/
+  );
+  assert.throws(
+    () => tokenEmail.createSmtpTransport({}),
+    /SMTP_HOST, SMTP_USER, and SMTP_PASS/
+  );
+  const { transporter } = tokenEmail.createSmtpTransport({
+    SMTP_HOST: 'smtp.example.edu.et',
+    SMTP_PORT: '587',
+    SMTP_USER: 'elections@example.edu.et',
+    SMTP_PASS: 'test-password'
+  });
+  assert.equal(transporter.options.requireTLS, true);
+  transporter.close();
+});
+
+test('token email delivery state is persisted without linking voter IDs to the anonymous token ledger', () => {
+  const electionStartTime = '2026-11-01T09:00:00Z';
+  const voterId = 'UGR/0003/15';
+  const rawToken = tokenEmail.generateVotingToken();
+  const tokenHash = crypto.createHash('sha256').update(rawToken).digest('hex');
+  const encryptedToken = tokenEmail.encryptPendingToken(process.env.VOTING_TOKEN_SECRET, rawToken);
+  db.executeRun('UPDATE voter_registry SET is_registered = 1 WHERE ugr_id = ?', [voterId]);
+  assert.equal(
+    db.createPendingTokenEmailDelivery(electionStartTime, voterId, tokenHash, encryptedToken),
+    true
+  );
+  assert.deepEqual(db.getPendingTokenEmailDeliveries(electionStartTime), [
+    {
+      voter_ugr_id: voterId,
+      attempts: 0,
+      token_hash: tokenHash,
+      ciphertext: encryptedToken.ciphertext,
+      iv: encryptedToken.iv,
+      auth_tag: encryptedToken.authTag
+    }
+  ]);
+  db.recordTokenEmailAttempt(electionStartTime, voterId);
+  db.markTokenEmailDelivered(electionStartTime, voterId);
+
+  assert.equal(db.isTokenEmailDelivered(electionStartTime, voterId), true);
+  assert.deepEqual(db.getPendingTokenEmailDeliveries(electionStartTime), []);
+  assert.equal(
+    db.executeQueryOne('SELECT has_received_token FROM voter_registry WHERE ugr_id = ?', [voterId]).has_received_token,
+    1
+  );
+  assert.equal(
+    db.executeQueryOne('SELECT token_hash FROM tokens WHERE token_hash = ?', [tokenHash]).token_hash,
+    tokenHash
+  );
+  assert.deepEqual(
+    db.executeQueryOne(
+      `SELECT token_hash, token_ciphertext, token_iv, token_auth_tag
+       FROM token_email_deliveries WHERE voter_ugr_id = ?`,
+      [voterId]
+    ),
+    { token_hash: null, token_ciphertext: null, token_iv: null, token_auth_tag: null }
+  );
+  assert.equal(
+    db.executeQuery('PRAGMA table_info(tokens)').some((column) => column.name === 'voter_ugr_id'),
+    false
+  );
+});
+
+test('undelivered voting tokens are removed from the anonymous ledger at election start', () => {
+  const electionStartTime = '2026-11-02T09:00:00Z';
+  const voterId = 'UGR/0004/15';
+  const rawToken = tokenEmail.generateVotingToken();
+  const tokenHash = crypto.createHash('sha256').update(rawToken).digest('hex');
+  const encryptedToken = tokenEmail.encryptPendingToken(process.env.VOTING_TOKEN_SECRET, rawToken);
+  db.createPendingTokenEmailDelivery(electionStartTime, voterId, tokenHash, encryptedToken);
+
+  assert.equal(
+    db.executeQueryOne('SELECT token_hash FROM tokens WHERE token_hash = ?', [tokenHash]).token_hash,
+    tokenHash
+  );
+  assert.equal(db.discardPendingTokenEmailDeliveries(electionStartTime), 1);
+  assert.equal(db.isTokenEmailDelivered(electionStartTime, voterId), false);
+  assert.equal(
+    db.executeQueryOne('SELECT token_hash FROM tokens WHERE token_hash = ?', [tokenHash]),
+    null
+  );
 });
