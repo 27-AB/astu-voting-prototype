@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { adminLogin, getAdminJudgingResults, logout } from "../api";
+import Brand from "../components/Brand";
 
 export default function AdminJudgingDashboard() {
   const [username, setUsername] = useState("");
@@ -87,7 +88,7 @@ export default function AdminJudgingDashboard() {
   return (
     <main className="page authority-page">
       <section className="card authority-card">
-        <div className="logo">ASTU · ADMIN REVIEW</div>
+        <Brand label="Admin review" />
         <h1>Candidate proposal evaluations</h1>
         <p className="muted">
           This confidential view is available to admins before voting opens.

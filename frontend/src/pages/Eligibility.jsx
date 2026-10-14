@@ -1,12 +1,12 @@
 // Eligibility.jsx: tells the student if they can vote (green) or not (red).
 import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { getAnnouncements, getElectionStatus, getEligibility, logout, registerForElection } from "../api";
+import { getAnnouncements, getElectionStatus, getEligibility, logout } from "../api";
+import Brand from "../components/Brand";
 
 export default function Eligibility() {
   const [result, setResult] = useState(null); // null = still loading
   const [error, setError] = useState("");
-  const [registering, setRegistering] = useState(false);
   const [election, setElection] = useState(null);
   const [announcements, setAnnouncements] = useState([]);
   const navigate = useNavigate();
@@ -45,23 +45,11 @@ export default function Eligibility() {
     navigate("/");
   }
 
-  async function handleRegistration() {
-    setError("");
-    setRegistering(true);
-    try {
-      await registerForElection();
-      setResult(await getEligibility());
-    } catch (registrationError) {
-      setError(registrationError.message);
-    } finally {
-      setRegistering(false);
-    }
-  }
-
   if (error) {
     return (
       <main className="page">
         <div className="card">
+          <Brand />
           <p className="error">{error}</p>
           <button className="btn" onClick={signOut}>Back to sign in</button>
         </div>
@@ -72,7 +60,7 @@ export default function Eligibility() {
   if (!result) {
     return (
       <main className="page">
-        <div className="card"><p className="muted">Checking your eligibility...</p></div>
+        <div className="card"><Brand /><p className="muted">Checking your eligibility...</p></div>
       </main>
     );
   }
@@ -81,35 +69,39 @@ export default function Eligibility() {
     <main className="page">
       {result.eligible ? (
         <div className="card ok">
-          <h1>You are eligible for parliamentary voting</h1>
+          <Brand label="Student election" />
+          <h1>{result.election_role === "CANDIDATE" ? "You selected the candidate role" : "You are eligible for parliamentary voting"}</h1>
           {!result.parliament_member ? (
             <p>Your account is not on the approved parliament voter roster.</p>
-          ) : !result.registered_for_election ? (
-            <>
-              <p>Register for this election to confirm your participation.</p>
-              <button className="btn" onClick={handleRegistration} disabled={registering}>
-                {registering ? "Registering..." : "Register as a voter"}
-              </button>
-            </>
+          ) : result.election_role === "CANDIDATE" ? (
+            <p>You selected the candidate role and are not registered as a parliamentary voter.</p>
+          ) : result.election_role === "NONE" ? (
+            <p>You selected no election registration.</p>
+          ) : result.election_role !== "VOTER" ? (
+            <p>Choose whether to register as a candidate, voter, or neither.</p>
+          ) : result.has_received_token && result.demo_mode ? (
+            <p>This local presentation uses a synthetic token; no email was sent.</p>
           ) : result.has_received_token ? (
-            <p>You already received your one-time voting token. Continue to the ballot page.</p>
+            <p>Your one-time token was sent to your registered student email. Enter it on the ballot page.</p>
           ) : election?.phase !== "open" ? (
-            <p>You are registered. Token requests open when the election begins.</p>
+            <p>You are registered. Your voting token will be emailed 12 hours before the election starts.</p>
           ) : (
-            <p>Get your anonymous voting token. It is shown only once.</p>
+            <p>Check your registered student email for your token. You can check delivery status below.</p>
           )}
-          {result.parliament_member && result.registered_for_election && (result.has_received_token || election?.phase === "open") && (
+          {result.parliament_member && result.election_role === "VOTER" && result.registered_for_election && (result.has_received_token || election?.phase === "open") && (
             <button
               className="btn"
-              onClick={() => navigate(result.has_received_token ? "/ballot" : "/token")}
+              onClick={() => navigate(result.has_received_token && !result.demo_mode ? "/ballot" : "/token")}
             >
-              {result.has_received_token ? "Go to ballot" : "Get my voting token"}
+              {result.has_received_token && !result.demo_mode ? "Go to ballot" : result.demo_mode ? "Open demo token" : "Check token email"}
             </button>
           )}
+
           {error && <p className="error" role="alert">{error}</p>}
         </div>
       ) : (
         <div className="card no">
+          <Brand label="Student election" />
           <h1>You are not eligible to vote</h1>
           <p><strong>Reason:</strong> {result.reason}</p>
           <p className="muted">Contact the registrar or cafeteria office if you think this is a mistake.</p>
@@ -126,6 +118,9 @@ export default function Eligibility() {
           ))}
         </section>
       )}
+      <button className="btn secondary" onClick={() => navigate("/participation")}>
+        Change election participation choice
+      </button>
       <button className="link" onClick={signOut}>Sign out</button>
     </main>
   );

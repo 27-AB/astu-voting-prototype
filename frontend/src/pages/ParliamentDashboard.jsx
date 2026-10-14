@@ -8,6 +8,7 @@ import {
   getAnnouncements,
   logout,
 } from "../api";
+import Brand from "../components/Brand";
 
 const POSITIONS = ["President", "Vice President", "Secretary"];
 
@@ -90,7 +91,7 @@ export default function ParliamentDashboard() {
   return (
     <main className="page authority-page">
       <section className="card authority-card">
-        <div className="logo">ASTU · PARLIAMENTARY VOTING</div>
+        <Brand label="Parliamentary voting" />
         <h1>Parliament voter ballot</h1>
         <p className="muted">
           Each registered and eligible parliament member has one ballot. Every

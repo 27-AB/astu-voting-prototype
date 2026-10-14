@@ -91,6 +91,9 @@ export function saveDb(db) {
 }
 
 function initializeTables(db) {
+  const hadParticipationTable = Boolean(db.exec(
+    "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'election_participation'"
+  )[0]?.values.length);
   db.run(`
     CREATE TABLE IF NOT EXISTS registrar_students (
       ugr_id TEXT PRIMARY KEY,
@@ -112,6 +115,28 @@ function initializeTables(db) {
       has_received_token INTEGER NOT NULL DEFAULT 0,
       is_registered INTEGER NOT NULL DEFAULT 0,
       FOREIGN KEY (ugr_id) REFERENCES registrar_students(ugr_id)
+    );
+
+    CREATE TABLE IF NOT EXISTS election_participation (
+      ugr_id TEXT PRIMARY KEY,
+      choice TEXT NOT NULL CHECK (choice IN ('CANDIDATE', 'VOTER', 'NONE')),
+      updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (ugr_id) REFERENCES registrar_students(ugr_id)
+    );
+
+    CREATE TABLE IF NOT EXISTS token_email_deliveries (
+      election_start_time TEXT NOT NULL,
+      voter_ugr_id TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'sent')),
+      attempts INTEGER NOT NULL DEFAULT 0,
+      last_error TEXT,
+      mailed_at TEXT,
+      token_hash TEXT,
+      token_ciphertext TEXT,
+      token_iv TEXT,
+      token_auth_tag TEXT,
+      PRIMARY KEY (election_start_time, voter_ugr_id),
+      FOREIGN KEY (voter_ugr_id) REFERENCES registrar_students(ugr_id)
     );
 
     CREATE TABLE IF NOT EXISTS tokens (
@@ -164,6 +189,24 @@ function initializeTables(db) {
   addColumnIfMissing(db, 'registrar_students', 'voter_type', "TEXT NOT NULL DEFAULT 'STANDARD' CHECK (voter_type IN ('STANDARD', 'AUTHORITY'))");
   addColumnIfMissing(db, 'voter_registry', 'is_registered', 'INTEGER NOT NULL DEFAULT 0 CHECK (is_registered IN (0, 1))');
   addColumnIfMissing(db, 'candidates', 'student_ugr_id', 'TEXT REFERENCES registrar_students(ugr_id)');
+  addColumnIfMissing(db, 'token_email_deliveries', 'token_hash', 'TEXT');
+  addColumnIfMissing(db, 'token_email_deliveries', 'token_ciphertext', 'TEXT');
+  addColumnIfMissing(db, 'token_email_deliveries', 'token_iv', 'TEXT');
+  addColumnIfMissing(db, 'token_email_deliveries', 'token_auth_tag', 'TEXT');
+  if (!hadParticipationTable) {
+    db.run(`
+      INSERT OR IGNORE INTO election_participation (ugr_id, choice)
+      SELECT student_ugr_id, 'CANDIDATE'
+      FROM candidates
+      WHERE student_ugr_id IS NOT NULL
+    `);
+    db.run(`
+      INSERT OR IGNORE INTO election_participation (ugr_id, choice)
+      SELECT ugr_id, 'VOTER'
+      FROM voter_registry
+      WHERE is_registered = 1
+    `);
+  }
 }
 
 function applyAuthorityConfiguration(db) {
@@ -189,6 +232,196 @@ function applyAuthorityConfiguration(db) {
 
 export function getConfiguredParliamentIds() {
   return configuredParliamentIds();
+}
+
+export function chooseElectionParticipation(ugrId, choice, profile = null) {
+  if (!dbInstance) throw new Error('Database not initialized');
+  const db = dbInstance;
+  db.run('BEGIN IMMEDIATE TRANSACTION');
+  try {
+    const existing = executeQueryOne(
+      'SELECT choice FROM election_participation WHERE ugr_id = ?',
+      [ugrId]
+    );
+    const existingCandidate = executeQueryOne(
+      'SELECT id FROM candidates WHERE student_ugr_id = ?',
+      [ugrId]
+    );
+
+    if (existingCandidate && choice !== 'CANDIDATE') {
+      const hasVotes = executeQueryOne(
+        'SELECT 1 FROM votes WHERE candidate_id = ? LIMIT 1',
+        [existingCandidate.id]
+      );
+      if (hasVotes) {
+        db.run('ROLLBACK');
+        return { status: 'candidate-has-votes' };
+      }
+      db.run('DELETE FROM judge_scores WHERE candidate_id = ?', [existingCandidate.id]);
+      db.run('DELETE FROM candidates WHERE id = ?', [existingCandidate.id]);
+    }
+
+    if (choice === 'CANDIDATE') {
+      db.run(
+        'UPDATE voter_registry SET is_registered = 0 WHERE ugr_id = ?',
+        [ugrId]
+      );
+      if (existingCandidate) {
+        db.run(
+          'UPDATE candidates SET name = ?, position = ?, bio = ?, manifesto = ? WHERE id = ?',
+          [profile.name, profile.position, profile.bio, profile.manifesto, existingCandidate.id]
+        );
+      } else {
+        db.run(
+          'INSERT INTO candidates (name, position, bio, manifesto, student_ugr_id) VALUES (?, ?, ?, ?, ?)',
+          [profile.name, profile.position, profile.bio, profile.manifesto, ugrId]
+        );
+      }
+    } else if (choice === 'VOTER') {
+      db.run(
+        'INSERT INTO voter_registry (ugr_id, has_received_token, is_registered) VALUES (?, 0, 1) ' +
+        'ON CONFLICT(ugr_id) DO UPDATE SET is_registered = 1',
+        [ugrId]
+      );
+    } else {
+      db.run('UPDATE voter_registry SET is_registered = 0 WHERE ugr_id = ?', [ugrId]);
+    }
+
+    db.run(
+      `INSERT INTO election_participation (ugr_id, choice, updated_at)
+       VALUES (?, ?, CURRENT_TIMESTAMP)
+       ON CONFLICT(ugr_id) DO UPDATE SET choice = excluded.choice, updated_at = CURRENT_TIMESTAMP`,
+      [ugrId, choice]
+    );
+    db.run('COMMIT');
+    saveDb(db);
+    return {
+      status: 'saved',
+      choice,
+      candidate_id: choice === 'CANDIDATE'
+        ? executeQueryOne('SELECT id FROM candidates WHERE student_ugr_id = ?', [ugrId]).id
+        : null,
+      changed: existing?.choice !== choice
+    };
+  } catch (error) {
+    db.run('ROLLBACK');
+    throw error;
+  }
+}
+
+export function hasTokenEmailDeliveryRecord(electionStartTime, voterId) {
+  return Boolean(executeQueryOne(
+    `SELECT 1 FROM token_email_deliveries
+     WHERE election_start_time = ? AND voter_ugr_id = ?`,
+    [electionStartTime, voterId]
+  ));
+}
+
+export function createPendingTokenEmailDelivery(electionStartTime, voterId, tokenHash, encryptedToken) {
+  if (!dbInstance) throw new Error('Database not initialized');
+  const db = dbInstance;
+  db.run('BEGIN IMMEDIATE TRANSACTION');
+  try {
+    db.run(
+      `INSERT OR IGNORE INTO token_email_deliveries
+       (election_start_time, voter_ugr_id, token_hash, token_ciphertext, token_iv, token_auth_tag)
+       VALUES (?, ?, ?, ?, ?, ?)`,
+      [
+        electionStartTime,
+        voterId,
+        tokenHash,
+        encryptedToken.ciphertext,
+        encryptedToken.iv,
+        encryptedToken.authTag
+      ]
+    );
+    if (db.getRowsModified() !== 1) {
+      db.run('ROLLBACK');
+      return false;
+    }
+    db.run('INSERT OR IGNORE INTO tokens (token_hash, is_used) VALUES (?, 0)', [tokenHash]);
+    db.run('COMMIT');
+    saveDb(db);
+    return true;
+  } catch (error) {
+    db.run('ROLLBACK');
+    throw error;
+  }
+}
+
+export function getPendingTokenEmailDeliveries(electionStartTime) {
+  return executeQuery(
+    `SELECT voter_ugr_id, attempts, token_hash, token_ciphertext AS ciphertext,
+            token_iv AS iv, token_auth_tag AS auth_tag
+     FROM token_email_deliveries
+     WHERE election_start_time = ? AND status = 'pending'
+     ORDER BY voter_ugr_id`,
+    [electionStartTime]
+  );
+}
+
+export function isTokenEmailDelivered(electionStartTime, voterId) {
+  return Boolean(executeQueryOne(
+    `SELECT 1 FROM token_email_deliveries
+     WHERE election_start_time = ? AND voter_ugr_id = ? AND status = 'sent'`,
+    [electionStartTime, voterId]
+  ));
+}
+
+export function recordTokenEmailAttempt(electionStartTime, voterId, errorMessage = null) {
+  if (!dbInstance) throw new Error('Database not initialized');
+  dbInstance.run(
+    `UPDATE token_email_deliveries
+     SET attempts = attempts + 1, last_error = ?
+     WHERE election_start_time = ? AND voter_ugr_id = ? AND status = 'pending'`,
+    [errorMessage, electionStartTime, voterId]
+  );
+  saveDb(dbInstance);
+}
+
+export function markTokenEmailDelivered(electionStartTime, voterId) {
+  if (!dbInstance) throw new Error('Database not initialized');
+  dbInstance.run(
+    `UPDATE token_email_deliveries
+     SET status = 'sent', last_error = NULL, mailed_at = CURRENT_TIMESTAMP,
+         token_hash = NULL, token_ciphertext = NULL, token_iv = NULL, token_auth_tag = NULL
+     WHERE election_start_time = ? AND voter_ugr_id = ? AND status = 'pending'`,
+    [electionStartTime, voterId]
+  );
+  dbInstance.run(
+    'UPDATE voter_registry SET has_received_token = 1 WHERE ugr_id = ? AND is_registered = 1',
+    [voterId]
+  );
+  saveDb(dbInstance);
+}
+
+export function discardPendingTokenEmailDeliveries(electionStartTime) {
+  if (!dbInstance) throw new Error('Database not initialized');
+  const db = dbInstance;
+  db.run('BEGIN IMMEDIATE TRANSACTION');
+  try {
+    const pending = executeQuery(
+      `SELECT voter_ugr_id, token_hash FROM token_email_deliveries
+       WHERE election_start_time = ? AND status = 'pending'`,
+      [electionStartTime]
+    );
+    for (const delivery of pending) {
+      if (delivery.token_hash) {
+        db.run('DELETE FROM tokens WHERE token_hash = ? AND is_used = 0', [delivery.token_hash]);
+      }
+    }
+    db.run(
+      `DELETE FROM token_email_deliveries
+       WHERE election_start_time = ? AND status = 'pending'`,
+      [electionStartTime]
+    );
+    db.run('COMMIT');
+    saveDb(db);
+    return pending.length;
+  } catch (error) {
+    db.run('ROLLBACK');
+    throw error;
+  }
 }
 
 function seedIfEmpty(db) {
@@ -376,6 +609,8 @@ export function performRollover() {
   dbInstance.run('DELETE FROM judge_scores');
   dbInstance.run('DELETE FROM votes');
   dbInstance.run('DELETE FROM tokens');
+  dbInstance.run('DELETE FROM token_email_deliveries');
+  dbInstance.run('DELETE FROM election_participation');
   dbInstance.run('UPDATE voter_registry SET has_received_token = 0, is_registered = 0');
   saveDb(dbInstance);
 

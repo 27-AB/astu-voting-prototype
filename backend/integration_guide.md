@@ -130,9 +130,14 @@ async function checkEligibility() {
 
 ---
 
-### Step 3: Generate Anonymous Token (`POST /api/token`)
+### Step 3: Receive and Retrieve the Emailed Token
+
+Parliament voter registration closes 12 hours before `ELECTION_START_TIME`. At that deadline, the backend worker emails each registered eligible parliament voter a single-use token at the address derived from their UGR ID (for example, `UGR/0001/15` becomes `ugr-0001-15@astu.edu.et`). The frontend should tell voters to check their official email and provide a field on the ballot page to enter the emailed token.
+
+During the election, an authenticated voter can optionally confirm email delivery through `POST /api/token`:
+
 ```javascript
-async function generateToken() {
+async function checkTokenEmailDelivery() {
   const token = localStorage.getItem('student_token');
   const response = await fetch(`${API_BASE}/token`, {
     method: 'POST',
@@ -146,8 +151,9 @@ async function generateToken() {
     throw new Error(data.error || 'Token request denied');
   }
 
-  // data = { token: "ASTU-XXXX-XXXX-XXXX-XXXX", message: "..." }
-  return data.token;
+  // data = { email_sent: true, message: "Your voting token was sent..." }
+  // The raw token is not returned by this API; the voter enters it from their email.
+  return data.email_sent;
 }
 ```
 
@@ -166,13 +172,13 @@ async function getCandidates() {
 ### Step 5: Submit Anonymous Ballot (`POST /api/vote`)
 *Note: Do NOT send any Authorization header or Student ID here! The vote is 100% anonymous.*
 ```javascript
-async function castVote(votingToken, candidateId) {
+async function castVote(votingToken, candidateIds) {
   const response = await fetch(`${API_BASE}/vote`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
       token: votingToken,
-      candidate_id: candidateId
+      votes: candidateIds // one candidate ID each for President, Vice President, Secretary
     })
   });
 
@@ -181,7 +187,7 @@ async function castVote(votingToken, candidateId) {
     // If token already used or invalid: returns HTTP 400 with clear message
     throw new Error(data.error);
   }
-  return data; // { success: true, message: "..." }
+  return data; // { message: "Vote recorded" }
 }
 ```
 
@@ -222,7 +228,7 @@ When Person B finishes the screens on Day 6, sit down together and verify these 
 | 1 | Low GPA Login | `UGR/1001/14` / `password123` | Red "Not Eligible" screen: displays `CGPA 2.45 <= 3.00` |
 | 2 | Edge Case Boundary | `UGR/1002/14` / `password123` | Red "Not Eligible" screen: strictly rejected (Art. 4.2: `CGPA > 3.00`) |
 | 3 | No Cafeteria | `UGR/1003/14` / `password123` | Red "Not Eligible" screen: inactive cafeteria residency |
-| 4 | Eligible Voter | `UGR/1005/14` / `password123` | Green "Eligible" screen: allows generating token and voting |
+| 4 | Eligible Voter | `UGR/1005/14` / `password123` | Green "Eligible" screen: register before the 12-hour deadline, then enter emailed token to vote |
 | 5 | Replay Test | Same token as Step 4 | Submitting ballot second time shows error popup: "Token already expended" |
 | 6 | Live Admin Update | `admin` / `admin123` | Live results chart increments by 1 and turnout % recalculates |
 | 7 | Anonymity Verification | DB Inspector / Terminal | Run `SELECT * FROM votes;` $\rightarrow$ prove zero student or token columns |
@@ -246,7 +252,7 @@ The checked-in backend uses Express and `sql.js`/SQLite (not Prisma/PostgreSQL).
 - `PARLIAMENT_VOTER_IDS`: exactly 50–100 distinct registered, eligible non-judge IDs. Each must have CGPA above 3.00 and active cafeteria access.
 - `ELECTION_START_TIME` and `ELECTION_END_TIME`: timezone-qualified ISO-8601 timestamps, with the start earlier than the end. Voting fails closed when these values are missing or invalid.
 
-Judges login through the normal student login and are routed to `/judge`. They score every candidate proposal from 0–20 and can revise scores until election end. Voting is rejected until both judges score every candidate. Each eligible parliament member explicitly registers before election start, receives one hashed anonymous token, and casts one ballot selecting each of the three positions.
+Judges login through the normal student login and are routed to `/judge`. They score every candidate proposal from 0–20 and can revise scores until election end. Voting is rejected until both judges score every candidate. Each eligible parliament member explicitly registers at least 12 hours before election start, receives a single-use token by email, and casts one ballot selecting each of the three positions.
 
 Final ranks combine the average judge score scaled to 30 points with the candidate's per-position share of parliament votes scaled to 70 points. Judge ratings are available to admins before voting, registered parliament voters during voting, and candidates and the public after election close. Candidates are linked to their student login using `student_ugr_id` on each admin-created candidate record; their dashboard is `/candidate`.
 

@@ -1,12 +1,17 @@
 import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { getCandidateDashboard, logout } from "../api";
+import { getCandidateDashboard, getCandidateProfile, getElectionParticipation, logout, updateCandidateProfile } from "../api";
+import Brand from "../components/Brand";
 
 const POSITIONS = ["President", "Vice President", "Secretary"];
 
 export default function CandidateDashboard() {
   const [data, setData] = useState(null);
   const [error, setError] = useState("");
+  const [profile, setProfile] = useState(null);
+  const [profileMessage, setProfileMessage] = useState("");
+  const [savingProfile, setSavingProfile] = useState(false);
+  const [canChangeChoice, setCanChangeChoice] = useState(false);
   const navigate = useNavigate();
 
   useEffect(() => {
@@ -22,6 +27,13 @@ export default function CandidateDashboard() {
         .catch((requestError) => {
           if (active) setError(requestError.message);
         });
+      getElectionParticipation()
+        .then((participation) => {
+          if (active) setCanChangeChoice(participation.can_change_choice);
+        })
+        .catch((requestError) => {
+          if (active) setError(requestError.message);
+        });
     };
     refresh();
     const interval = window.setInterval(refresh, 5000);
@@ -30,6 +42,34 @@ export default function CandidateDashboard() {
       window.clearInterval(interval);
     };
   }, []);
+
+  useEffect(() => {
+    getCandidateProfile()
+      .then(setProfile)
+      .catch((requestError) => setError(requestError.message));
+    getElectionParticipation()
+      .then((participation) => setCanChangeChoice(participation.can_change_choice))
+      .catch((requestError) => setError(requestError.message));
+  }, []);
+
+  async function saveProfile(event) {
+    event.preventDefault();
+    setSavingProfile(true);
+    setError("");
+    setProfileMessage("");
+    try {
+      setProfile(await updateCandidateProfile({
+        position: profile.position,
+        bio: profile.bio,
+        manifesto: profile.manifesto,
+      }));
+      setProfileMessage("Your candidate profile was updated.");
+    } catch (requestError) {
+      setError(requestError.message);
+    } finally {
+      setSavingProfile(false);
+    }
+  }
 
   function signOut() {
     logout();
@@ -41,8 +81,24 @@ export default function CandidateDashboard() {
   return (
     <main className="page authority-page">
       <section className="card authority-card">
-        <div className="logo">ASTU · CANDIDATE DASHBOARD</div>
+        <Brand label="Candidate dashboard" />
         <h1>Your election standing</h1>
+        {data?.phase === "scheduled" && profile && (
+          <form className="candidate-profile-form" onSubmit={saveProfile}>
+            <h2>Edit your candidate profile</h2>
+            <p className="muted">Only you can edit this profile, and changes close when voting starts.</p>
+            <label htmlFor="profile-position">Position</label>
+            <select id="profile-position" value={profile.position} onChange={(event) => setProfile({ ...profile, position: event.target.value })}>
+              {POSITIONS.map((position) => <option key={position}>{position}</option>)}
+            </select>
+            <label htmlFor="profile-bio">Biography</label>
+            <textarea id="profile-bio" rows="3" maxLength="500" value={profile.bio} onChange={(event) => setProfile({ ...profile, bio: event.target.value })} />
+            <label htmlFor="profile-manifesto">Proposal / manifesto</label>
+            <textarea id="profile-manifesto" rows="7" maxLength="5000" value={profile.manifesto} onChange={(event) => setProfile({ ...profile, manifesto: event.target.value })} />
+            {profileMessage && <p className="success" role="status">{profileMessage}</p>}
+            <button className="btn" disabled={savingProfile}>{savingProfile ? "Saving..." : "Save profile"}</button>
+          </form>
+        )}
         <p className="muted">
           {data?.results_published
             ? "Official final rankings and proposal evaluations are now available."
@@ -95,6 +151,7 @@ export default function CandidateDashboard() {
         <button className="btn secondary" onClick={() => navigate("/eligibility")}>
           Check parliamentary voter eligibility
         </button>
+        {canChangeChoice && <button className="link" onClick={() => navigate("/participation")}>Change election participation choice</button>}
         <button className="link" onClick={signOut}>Sign out</button>
       </section>
     </main>
