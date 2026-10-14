@@ -2,6 +2,7 @@
 import { useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { login } from "../api";
+import Brand from "../components/Brand";
 
 export default function Login() {
   // "state" = values the page remembers. When they change, the page redraws.
@@ -40,7 +41,7 @@ export default function Login() {
   return (
     <main className="page">
       <div className="card">
-        <div className="logo">ASTU</div>
+        <Brand />
         <h1>Student election</h1>
         <p className="muted">Sign in with your UGR ID to check if you can vote.</p>
 

@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { checkTokenEmailDelivery } from "../api";
+import Brand from "../components/Brand";
 
 export default function Token() {
   const [emailSent, setEmailSent] = useState(false);
@@ -26,6 +27,7 @@ export default function Token() {
   return (
     <main className="page">
       <div className="card">
+        <Brand label="Student election" />
         <h1>Your voting token</h1>
         <p className="muted">
           Your single-use token is sent to your registered student email 12

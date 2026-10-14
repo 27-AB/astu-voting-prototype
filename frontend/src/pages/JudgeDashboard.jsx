@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { getElectionStatus, getJudgeCandidates, logout, submitJudgeScore } from "../api";
+import Brand from "../components/Brand";
 
 const POSITIONS = ["President", "Vice President", "Secretary"];
 
@@ -74,7 +75,7 @@ export default function JudgeDashboard() {
   return (
     <main className="page authority-page">
       <section className="card authority-card">
-        <div className="logo">ASTU · STUDENT AFFAIRS JUDGE</div>
+        <Brand label="Student affairs judge" />
         <p className="authority-eyebrow">Welcome, {judgeName}</p>
         <h1>Candidate proposal evaluations</h1>
         <p className="muted">

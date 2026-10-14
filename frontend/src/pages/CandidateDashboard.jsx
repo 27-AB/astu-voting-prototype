@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { getCandidateDashboard, logout } from "../api";
+import Brand from "../components/Brand";
 
 const POSITIONS = ["President", "Vice President", "Secretary"];
 
@@ -41,7 +42,7 @@ export default function CandidateDashboard() {
   return (
     <main className="page authority-page">
       <section className="card authority-card">
-        <div className="logo">ASTU · CANDIDATE DASHBOARD</div>
+        <Brand label="Candidate dashboard" />
         <h1>Your election standing</h1>
         <p className="muted">
           {data?.results_published

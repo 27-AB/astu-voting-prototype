@@ -2,6 +2,7 @@
 import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { getAnnouncements, getElectionStatus, getEligibility, logout, registerForElection } from "../api";
+import Brand from "../components/Brand";
 
 export default function Eligibility() {
   const [result, setResult] = useState(null); // null = still loading
@@ -62,6 +63,7 @@ export default function Eligibility() {
     return (
       <main className="page">
         <div className="card">
+          <Brand />
           <p className="error">{error}</p>
           <button className="btn" onClick={signOut}>Back to sign in</button>
         </div>
@@ -72,7 +74,7 @@ export default function Eligibility() {
   if (!result) {
     return (
       <main className="page">
-        <div className="card"><p className="muted">Checking your eligibility...</p></div>
+        <div className="card"><Brand /><p className="muted">Checking your eligibility...</p></div>
       </main>
     );
   }
@@ -81,6 +83,7 @@ export default function Eligibility() {
     <main className="page">
       {result.eligible ? (
         <div className="card ok">
+          <Brand label="Student election" />
           <h1>You are eligible for parliamentary voting</h1>
           {!result.parliament_member ? (
             <p>Your account is not on the approved parliament voter roster.</p>
@@ -114,6 +117,7 @@ export default function Eligibility() {
         </div>
       ) : (
         <div className="card no">
+          <Brand label="Student election" />
           <h1>You are not eligible to vote</h1>
           <p><strong>Reason:</strong> {result.reason}</p>
           <p className="muted">Contact the registrar or cafeteria office if you think this is a mistake.</p>
