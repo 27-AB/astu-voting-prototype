@@ -13,6 +13,38 @@ npm run dev
 
 The server listens on `http://localhost:3000` by default. Configure the election, voter roster, SMTP, email domain, and token secret environment variables before starting it; the backend returns `503` when election configuration is invalid and logs/retries token delivery if SMTP is unavailable. The SQLite database file is created under `backend/data/`.
 
+### Presentation demo (synthetic data only)
+
+For a presentation or rehearsal without official student data or outbound email, run:
+
+```bash
+npm run demo -- scheduled
+```
+
+Use a second terminal for the frontend (`cd ../frontend && npm install && npm run dev`). The demo server runs on `http://localhost:3000` and binds only to `127.0.0.1`. Its isolated SQLite file is recreated under `backend/demo-data/data/` each time it starts; the regular backend database is untouched.
+
+Choose a phase by restarting the backend with one of these modes:
+
+```bash
+npm run demo -- scheduled
+npm run demo -- open
+npm run demo -- closed
+```
+
+In Windows PowerShell, start the services in separate terminals from the repository root:
+
+```powershell
+Set-Location .\backend
+npm run demo -- scheduled
+```
+
+```powershell
+Set-Location .\frontend
+npm run dev -- --host 127.0.0.1
+```
+
+Stop the backend with Ctrl+C before switching phases. Each launch recreates only the isolated synthetic demo database. The scheduled phase is configured for role selection and profile editing. The open phase has 50 synthetic registered voters, pre-scored proposals, and one seeded demo ballot token. The closed phase has synthetic votes and publishes final results. The runner prints demo-only login credentials and, in open mode, the test token. No SMTP configuration is loaded or email sent. Do not use these accounts, seeded tokens, or results for a real election.
+
 ### Scheduled email setup
 
 1. Copy `.env.example` to `.env` and set the election timestamps and official parliament voter IDs.

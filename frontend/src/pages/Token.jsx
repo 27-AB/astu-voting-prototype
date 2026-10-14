@@ -6,6 +6,7 @@ import Brand from "../components/Brand";
 export default function Token() {
   const [emailSent, setEmailSent] = useState(false);
   const [demoToken, setDemoToken] = useState("");
+  const [demoMode, setDemoMode] = useState(sessionStorage.getItem("demo_mode") === "true");
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
   const navigate = useNavigate();
@@ -17,6 +18,7 @@ export default function Token() {
       const delivery = await checkTokenEmailDelivery();
       setEmailSent(delivery.email_sent);
       setDemoToken(delivery.demo_token || "");
+      setDemoMode(delivery.demo_mode === true);
     } catch (requestError) {
       setError(requestError.message);
     } finally {
@@ -30,8 +32,9 @@ export default function Token() {
         <Brand label="Student election" />
         <h1>Your voting token</h1>
         <p className="muted">
-          Your single-use token is sent to your registered student email 12
-          hours before voting opens. Check your inbox and keep the token secret.
+          {demoMode
+            ? "This presentation token is synthetic and stored only in the local demo. No email was sent."
+            : "Your single-use token is sent to your registered student email 12 hours before voting opens. Check your inbox and keep the token secret."}
         </p>
         {error && <p className="error" role="alert">{error}</p>}
         {demoToken && (
@@ -41,13 +44,13 @@ export default function Token() {
         )}
         {!emailSent ? (
           <button className="btn" onClick={handleCheckDelivery} disabled={loading}>
-            {loading ? "Checking..." : "Check token email delivery"}
+            {loading ? "Checking..." : demoMode ? "Show synthetic demo token" : "Check token email delivery"}
           </button>
         ) : (
           <>
             <p className="success" role="status">
               {demoToken
-                ? "Demo token ready. Copy it into the ballot."
+                ? "Synthetic demo token ready. Copy it into the ballot."
                 : "Token delivery is confirmed. Enter the token from your email on the ballot."}
             </p>
             <button className="btn" onClick={() => navigate("/ballot")}>

@@ -101,6 +101,8 @@ Success (200):
 
 The backend schedules cryptographically random token generation and email delivery for 12 hours before `ELECTION_START_TIME`. Token emails are sent to the address derived from the UGR ID and `STUDENT_EMAIL_DOMAIN`; failed SMTP deliveries are retried until voting starts. This endpoint confirms delivery but never returns the secret token.
 
+The isolated presentation runner sets `demo_mode: true` and returns a synthetic `demo_token` only for its synthetic local account. It binds to loopback, uses a separate demo database, and does not send email. Never enable this mode for a real election.
+
 ### GET /api/candidates
 Success (200):
 ```json

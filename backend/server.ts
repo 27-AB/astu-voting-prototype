@@ -474,7 +474,8 @@ app.get('/api/eligibility', requireStudentAuth, (req: Request, res: Response) =>
     has_received_token: hasReceivedToken,
     parliament_member: isParliamentMember,
     registered_for_election: registry?.is_registered === 1 && participation?.choice === 'VOTER',
-    election_role: participation?.choice || null
+    election_role: participation?.choice || null,
+    demo_mode: process.env.DEMO_MODE === 'true'
   });
 });
 
@@ -586,7 +587,13 @@ app.post('/api/token', requireStudentAuth, rateLimiter(5, 60000), (req: Request,
 
   res.json({
     email_sent: true,
-    message: 'Your voting token was sent to your registered student email address.'
+    message: process.env.DEMO_MODE === 'true'
+      ? 'Synthetic demo token ready. No email was sent.'
+      : 'Your voting token was sent to your registered student email address.',
+    demo_mode: process.env.DEMO_MODE === 'true',
+    ...(process.env.DEMO_MODE === 'true' && process.env.DEMO_VOTING_TOKEN
+      ? { demo_token: process.env.DEMO_VOTING_TOKEN }
+      : {})
   });
 });
 
@@ -1186,8 +1193,9 @@ function startTokenEmailScheduler() {
 // ---------- Start ----------
 async function startServer() {
   await getDb();
-  startTokenEmailScheduler();
-  app.listen(PORT, '0.0.0.0', () => {
+  if (process.env.DEMO_MODE !== 'true') startTokenEmailScheduler();
+  const host = process.env.DEMO_MODE === 'true' ? '127.0.0.1' : '0.0.0.0';
+  app.listen(PORT, host, () => {
     console.log(`[ASTU Voting Backend] Running on port ${PORT}`);
   });
 }

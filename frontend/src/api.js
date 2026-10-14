@@ -88,7 +88,9 @@ export async function getEligibility() {
     const id = getSaved("ugr_id");
     return { ...mockStudents[id], has_received_token: gotToken.has(id) };
   }
-  return request("/api/eligibility", "GET", null, "student_token");
+  const data = await request("/api/eligibility", "GET", null, "student_token");
+  save("demo_mode", String(data.demo_mode === true));
+  return data;
 }
 
 export async function registerForElection() {

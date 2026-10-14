@@ -79,6 +79,8 @@ export default function Eligibility() {
             <p>You selected no election registration.</p>
           ) : result.election_role !== "VOTER" ? (
             <p>Choose whether to register as a candidate, voter, or neither.</p>
+          ) : result.has_received_token && result.demo_mode ? (
+            <p>This local presentation uses a synthetic token; no email was sent.</p>
           ) : result.has_received_token ? (
             <p>Your one-time token was sent to your registered student email. Enter it on the ballot page.</p>
           ) : election?.phase !== "open" ? (
@@ -89,9 +91,9 @@ export default function Eligibility() {
           {result.parliament_member && result.election_role === "VOTER" && result.registered_for_election && (result.has_received_token || election?.phase === "open") && (
             <button
               className="btn"
-              onClick={() => navigate(result.has_received_token ? "/ballot" : "/token")}
+              onClick={() => navigate(result.has_received_token && !result.demo_mode ? "/ballot" : "/token")}
             >
-              {result.has_received_token ? "Go to ballot" : "Check token email"}
+              {result.has_received_token && !result.demo_mode ? "Go to ballot" : result.demo_mode ? "Open demo token" : "Check token email"}
             </button>
           )}
 
