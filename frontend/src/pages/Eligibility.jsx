@@ -1,13 +1,12 @@
 // Eligibility.jsx: tells the student if they can vote (green) or not (red).
 import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { getAnnouncements, getElectionStatus, getEligibility, logout, registerForElection } from "../api";
+import { getAnnouncements, getElectionStatus, getEligibility, logout } from "../api";
 import Brand from "../components/Brand";
 
 export default function Eligibility() {
   const [result, setResult] = useState(null); // null = still loading
   const [error, setError] = useState("");
-  const [registering, setRegistering] = useState(false);
   const [election, setElection] = useState(null);
   const [announcements, setAnnouncements] = useState([]);
   const navigate = useNavigate();
@@ -46,19 +45,6 @@ export default function Eligibility() {
     navigate("/");
   }
 
-  async function handleRegistration() {
-    setError("");
-    setRegistering(true);
-    try {
-      await registerForElection();
-      setResult(await getEligibility());
-    } catch (registrationError) {
-      setError(registrationError.message);
-    } finally {
-      setRegistering(false);
-    }
-  }
-
   if (error) {
     return (
       <main className="page">
@@ -84,20 +70,15 @@ export default function Eligibility() {
       {result.eligible ? (
         <div className="card ok">
           <Brand label="Student election" />
-          <h1>You are eligible for parliamentary voting</h1>
+          <h1>{result.election_role === "CANDIDATE" ? "You selected the candidate role" : "You are eligible for parliamentary voting"}</h1>
           {!result.parliament_member ? (
             <p>Your account is not on the approved parliament voter roster.</p>
-          ) : !result.registered_for_election ? (
-            election?.registration_open ? (
-              <>
-                <p>Register for this election before registration closes 12 hours before voting begins.</p>
-                <button className="btn" onClick={handleRegistration} disabled={registering}>
-                  {registering ? "Registering..." : "Register as a voter"}
-                </button>
-              </>
-            ) : (
-              <p>Registration is closed. It ends 12 hours before voting begins.</p>
-            )
+          ) : result.election_role === "CANDIDATE" ? (
+            <p>You selected the candidate role and are not registered as a parliamentary voter.</p>
+          ) : result.election_role === "NONE" ? (
+            <p>You selected no election registration.</p>
+          ) : result.election_role !== "VOTER" ? (
+            <p>Choose whether to register as a candidate, voter, or neither.</p>
           ) : result.has_received_token ? (
             <p>Your one-time token was sent to your registered student email. Enter it on the ballot page.</p>
           ) : election?.phase !== "open" ? (
@@ -105,7 +86,7 @@ export default function Eligibility() {
           ) : (
             <p>Check your registered student email for your token. You can check delivery status below.</p>
           )}
-          {result.parliament_member && result.registered_for_election && (result.has_received_token || election?.phase === "open") && (
+          {result.parliament_member && result.election_role === "VOTER" && result.registered_for_election && (result.has_received_token || election?.phase === "open") && (
             <button
               className="btn"
               onClick={() => navigate(result.has_received_token ? "/ballot" : "/token")}
@@ -113,6 +94,7 @@ export default function Eligibility() {
               {result.has_received_token ? "Go to ballot" : "Check token email"}
             </button>
           )}
+
           {error && <p className="error" role="alert">{error}</p>}
         </div>
       ) : (
@@ -134,6 +116,9 @@ export default function Eligibility() {
           ))}
         </section>
       )}
+      <button className="btn secondary" onClick={() => navigate("/participation")}>
+        Change election participation choice
+      </button>
       <button className="link" onClick={signOut}>Sign out</button>
     </main>
   );

@@ -34,7 +34,7 @@ Registration closes exactly 12 hours before `ELECTION_START_TIME`, when the sche
 
 ## Roles and login response
 
-All students use the same login form. `voter_type` identifies whether an account is an appointed judge (`AUTHORITY`) or a standard student (`STANDARD`); `is_candidate` indicates whether the account is linked to a candidate profile.
+All students use the same login form. `voter_type` identifies whether an account is an appointed judge (`AUTHORITY`) or a standard student (`STANDARD`). Standard students make one exclusive election choice (`CANDIDATE`, `VOTER`, or `NONE`) through the participation API; appointed judges receive the `JUDGE` election role.
 
 ```json
 {
@@ -43,7 +43,8 @@ All students use the same login form. `voter_type` identifies whether an account
     "ugr_id": "UGR/1234/15",
     "name": "Student Name",
     "voter_type": "STANDARD",
-    "is_candidate": false
+    "is_candidate": false,
+    "election_role": null
   }
 }
 ```
@@ -53,14 +54,15 @@ Suggested frontend routing:
 | Login data | Destination |
 | --- | --- |
 | `voter_type === "AUTHORITY"` | Judge dashboard |
-| `is_candidate === true` | Candidate dashboard (the candidate may also be a registered parliament voter) |
-| Otherwise | Voter eligibility / registration page |
+| `election_role === "CANDIDATE"` | Candidate dashboard |
+| `election_role === "VOTER"` | Voter eligibility / ballot flow |
+| Otherwise | Election participation choice page |
 
 The server enforces roles on protected endpoints; hiding a page in the UI is not authorization.
 
 ## Election flow
 
-1. **Before start (`scheduled`)**: parliament members check eligibility and register before the registration deadline (12 hours before the election). Admins manage candidate profiles. Judges score proposals. Admins can review individual judge scores. Proposals are available to admins before voting opens.
+1. **Before start (`scheduled`)**: standard students choose candidate, voter, or no registration before the registration deadline (12 hours before the election). Voter choice requires eligibility and roster membership. Candidate choice creates a profile owned by the authenticated student; candidates can edit their position, bio, and manifesto until election start. Admins cannot create, edit, or delete candidate profiles. Judges score proposals, and admins can review individual judge scores.
 2. **12 hours before start**: the backend worker snapshots registered, eligible parliament voters and emails each voter a cryptographically random, single-use token at the UGR-derived address. Failed deliveries are retried every minute until voting starts. The worker stores token hashes in the anonymous token table and temporarily encrypts raw tokens in the pending-mail queue for retries; after successful delivery, it erases the queue's token hash and encrypted value.
 3. **Voting (`open`)**: only registered, eligible parliament voters can view proposals and their current judge averages. Voting is enabled only after both judges have scored every candidate and all three positions have candidates. A voter enters the emailed token and submits one complete ballot.
 4. **At/after end (`closed`)**: vote and token endpoints reject voting. Judges can no longer revise scores. Final results are available once judging is complete.
@@ -249,20 +251,18 @@ Admin bearer tokens come from `POST /api/admin/login` with `{ "username": "...",
 | --- | --- |
 | `GET /api/admin/judging-results` | View proposals and individual judge scores before voting starts. |
 | `GET /api/admin/results` | View candidate result breakdown and turnout. |
-| `POST /api/admin/candidates` | Add a candidate before the election starts. |
-| `PUT /api/admin/candidates/:id` | Edit a candidate before judging begins and before election start. |
-| `DELETE /api/admin/candidates/:id` | Remove an unscored candidate before election start. |
+| `POST`, `PUT`, `PATCH`, `DELETE /api/admin/candidates...` | Explicitly denied for authenticated admins (403). |
 | `POST /api/admin/announcements` | Create an announcement using `{ "title": "...", "body": "..." }`. |
 | `DELETE /api/admin/announcements/:id` | Delete an announcement. |
 | `POST /api/admin/rollover` | Reset election registration, tokens, judge scores, and votes for a new academic year. |
 
-Candidate create/update bodies use `{ "name", "position", "bio", "manifesto", "student_ugr_id" }`. The linked student must exist and must not be a judge. Admin candidate editing is locked after judges start scoring. There are no admin vote-edit endpoints.
+`GET /api/election/participation` returns the student's saved choice, eligibility, candidate profile, and whether selection remains open. `POST /api/election/participation` saves one of `CANDIDATE`, `VOTER`, or `NONE`. Candidate creation uses the authenticated student's registrar name and validates position, biography, and manifesto. `GET` and `PUT /api/candidate/profile` are owner-scoped; edits are allowed only until election start. There are no admin vote-edit endpoints.
 
 ## Frontend implementation checklist
 
 - [ ] Use `GET /api/election/status` as the source of truth for phase and timing.
-- [ ] Route judge and candidate accounts using `voter_type` and `is_candidate` from login.
-- [ ] For parliament users: eligibility → register before `registration_deadline` → receive the token by email 12 hours before the election → enter the emailed token and select all three positions during voting. `POST /api/token` confirms delivery but never returns the secret.
+- [ ] Route judge and candidate accounts using `voter_type` and `election_role` from login; send students with no saved role to the participation-choice page.
+- [ ] For parliament users: choose `VOTER` before `registration_deadline` → receive the token by email 12 hours before the election → enter the emailed token and select all three positions during voting. `POST /api/token` confirms delivery but never returns the secret.
 - [ ] Use `registration_open` from election status to disable registration at the 12-hour deadline.
 - [ ] Gate ballot display until `phase === "open"` and `judging_complete === true`.
 - [ ] After the end time, remove/disable ballot controls and load `GET /api/results` for final winners.

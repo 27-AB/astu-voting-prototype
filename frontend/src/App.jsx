@@ -7,6 +7,7 @@ import JudgeDashboard from "./pages/JudgeDashboard";
 import CandidateDashboard from "./pages/CandidateDashboard";
 import ParliamentDashboard from "./pages/ParliamentDashboard";
 import AdminJudgingDashboard from "./pages/AdminJudgingDashboard";
+import ElectionParticipation from "./pages/ElectionParticipation";
 
 function ProtectedRoleRoute({ role, children }) {
   const hasRole = role === "candidate"
@@ -23,6 +24,7 @@ export default function App() {
         {/* "/" is the first page people see */}
         <Route path="/" element={<Login />} />
         <Route path="/eligibility" element={<Eligibility />} />
+        <Route path="/participation" element={<ProtectedRoleRoute role="STANDARD"><ElectionParticipation /></ProtectedRoleRoute>} />
         <Route path="/token" element={<Token />} />
         <Route path="/judge" element={<ProtectedRoleRoute role="AUTHORITY"><JudgeDashboard /></ProtectedRoleRoute>} />
         <Route path="/authority" element={<Navigate to="/judge" replace />} />

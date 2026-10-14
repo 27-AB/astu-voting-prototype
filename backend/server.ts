@@ -11,6 +11,7 @@ import {
   executeRun,
   castAnonymousVote,
   getConfiguredParliamentIds,
+  chooseElectionParticipation,
   hasTokenEmailDeliveryRecord,
   createPendingTokenEmailDelivery,
   getPendingTokenEmailDeliveries,
@@ -148,6 +149,17 @@ function readCandidateResults() {
   return getCandidateRankings();
 }
 
+function isCandidateAccount(ugrId: string) {
+  return Boolean(executeQueryOne(
+    `SELECT c.id
+     FROM candidates c
+     JOIN election_participation ep ON ep.ugr_id = c.student_ugr_id
+     JOIN registrar_students s ON s.ugr_id = c.student_ugr_id
+     WHERE c.student_ugr_id = ? AND ep.choice = 'CANDIDATE' AND s.voter_type = 'STANDARD'`,
+    [ugrId]
+  ));
+}
+
 app.use(cors());
 app.use(express.json());
 
@@ -271,6 +283,14 @@ app.post('/api/login', rateLimiter(15, 60000), (req: Request, res: Response) => 
 
   const sessionToken = `stu_sess_${crypto.randomBytes(24).toString('hex')}`;
   studentSessions.set(sessionToken, { ugr_id: student.ugr_id, createdAt: Date.now() });
+  const participation = executeQueryOne<{ choice: string }>(
+    'SELECT choice FROM election_participation WHERE ugr_id = ?',
+    [student.ugr_id]
+  );
+  const isCandidate = Boolean(executeQueryOne(
+    'SELECT id FROM candidates WHERE student_ugr_id = ?',
+    [student.ugr_id]
+  ));
 
   res.json({
     token: sessionToken,
@@ -278,8 +298,133 @@ app.post('/api/login', rateLimiter(15, 60000), (req: Request, res: Response) => 
       ugr_id: student.ugr_id,
       name: student.name,
       voter_type: student.voter_type,
-      is_candidate: Boolean(executeQueryOne('SELECT id FROM candidates WHERE student_ugr_id = ?', [student.ugr_id]))
+      election_role: student.voter_type === 'AUTHORITY' ? 'JUDGE' : participation?.choice || null,
+      is_candidate: isCandidate
     }
+  });
+});
+
+app.get('/api/election/participation', requireStudentAuth, (req: Request, res: Response) => {
+  const ugrId = (req as any).studentUgrId as string;
+  const phase = getElectionPhase();
+  if (!phase) {
+    res.status(503).json({ error: 'Election schedule is not configured correctly' });
+    return;
+  }
+  const student = executeQueryOne<{ name: string; voter_type: string }>(
+    'SELECT name, voter_type FROM registrar_students WHERE ugr_id = ?',
+    [ugrId]
+  );
+  if (!student) {
+    res.status(404).json({ error: 'Student record not found' });
+    return;
+  }
+  const participation = executeQueryOne<{ choice: string; updated_at: string }>(
+    'SELECT choice, updated_at FROM election_participation WHERE ugr_id = ?',
+    [ugrId]
+  );
+  const profile = isCandidateAccount(ugrId)
+    ? executeQueryOne<{
+      id: number; name: string; position: string; bio: string; manifesto: string;
+    }>(
+      'SELECT id, name, position, bio, manifesto FROM candidates WHERE student_ugr_id = ?',
+      [ugrId]
+    )
+    : null;
+  const parliamentIds = getParliamentVoterIds(res);
+  if (!parliamentIds) return;
+  const cafeteria = executeQueryOne<{ is_active: number }>(
+    'SELECT is_active FROM cafeteria_records WHERE ugr_id = ?',
+    [ugrId]
+  );
+  const eligibleVoter = student.voter_type === 'STANDARD' &&
+    parliamentIds.includes(ugrId.toUpperCase()) &&
+    Boolean(executeQueryOne<{ cgpa: number }>(
+      'SELECT cgpa FROM registrar_students WHERE ugr_id = ? AND cgpa > 3',
+      [ugrId]
+    )) &&
+    cafeteria?.is_active === 1;
+  res.json({
+    election_role: student.voter_type === 'AUTHORITY' ? 'JUDGE' : participation?.choice || null,
+    choice_updated_at: participation?.updated_at || null,
+    eligible_voter: eligibleVoter,
+    candidate_profile: profile,
+    can_change_choice: student.voter_type === 'STANDARD' &&
+      phase.phase === 'scheduled' && phase.registration_open,
+    can_edit_candidate_profile: Boolean(profile) && phase.phase === 'scheduled'
+  });
+});
+
+app.post('/api/election/participation', requireStudentAuth, rateLimiter(10, 60000), (req: Request, res: Response) => {
+  const phase = getElectionPhase();
+  if (!phase) {
+    res.status(503).json({ error: 'Election schedule is not configured correctly' });
+    return;
+  }
+  if (phase.phase !== 'scheduled' || !phase.registration_open) {
+    res.status(403).json({ error: 'Election role selection closes 12 hours before the election starts' });
+    return;
+  }
+
+  const ugrId = (req as any).studentUgrId as string;
+  const student = executeQueryOne<{ name: string; voter_type: string; cgpa: number }>(
+    'SELECT name, voter_type, cgpa FROM registrar_students WHERE ugr_id = ?',
+    [ugrId]
+  );
+  if (!student) {
+    res.status(404).json({ error: 'Student record not found' });
+    return;
+  }
+  if (student.voter_type !== 'STANDARD') {
+    res.status(403).json({ error: 'Appointed judges do not select a candidate or voter role' });
+    return;
+  }
+
+  const { choice, position, bio, manifesto } = req.body || {};
+  if (!['CANDIDATE', 'VOTER', 'NONE'].includes(choice)) {
+    res.status(400).json({ error: 'Choose candidate, voter, or no election registration' });
+    return;
+  }
+  if (choice === 'CANDIDATE' && (
+    !WINNING_POSITIONS.includes(position) ||
+    typeof bio !== 'string' || bio.trim().length < 2 || bio.trim().length > 500 ||
+    typeof manifesto !== 'string' || manifesto.trim().length < 20 || manifesto.trim().length > 5000
+  )) {
+    res.status(400).json({ error: 'Candidate profile requires a position, a 2–500 character bio, and a 20–5000 character manifesto' });
+    return;
+  }
+  if (choice === 'VOTER') {
+    const parliamentIds = getParliamentVoterIds(res);
+    if (!parliamentIds) return;
+    const cafeteria = executeQueryOne<{ is_active: number }>(
+      'SELECT is_active FROM cafeteria_records WHERE ugr_id = ?',
+      [ugrId]
+    );
+    if (
+      !parliamentIds.includes(ugrId.toUpperCase()) ||
+      student.cgpa <= 3 ||
+      cafeteria?.is_active !== 1
+    ) {
+      res.status(403).json({ error: 'Only approved parliament members with CGPA above 3.0 and active cafeteria access may register as voters' });
+      return;
+    }
+  }
+
+  const result = chooseElectionParticipation(
+    ugrId,
+    choice,
+    choice === 'CANDIDATE'
+      ? { name: student.name, position, bio: bio.trim(), manifesto: manifesto.trim() }
+      : null
+  );
+  if (result.status === 'candidate-has-votes') {
+    res.status(409).json({ error: 'A candidate with recorded votes cannot change election roles' });
+    return;
+  }
+  res.json({
+    election_role: result.choice,
+    candidate_id: result.candidate_id,
+    message: 'Election participation choice saved'
   });
 });
 
@@ -304,6 +449,10 @@ app.get('/api/eligibility', requireStudentAuth, (req: Request, res: Response) =>
     'SELECT has_received_token, is_registered FROM voter_registry WHERE ugr_id = ?',
     [ugr_id]
   );
+  const participation = executeQueryOne<{ choice: string }>(
+    'SELECT choice FROM election_participation WHERE ugr_id = ?',
+    [ugr_id]
+  );
   const parliamentIds = getParliamentVoterIds(res);
   if (!parliamentIds) return;
 
@@ -324,7 +473,8 @@ app.get('/api/eligibility', requireStudentAuth, (req: Request, res: Response) =>
     reason,
     has_received_token: hasReceivedToken,
     parliament_member: isParliamentMember,
-    registered_for_election: registry?.is_registered === 1
+    registered_for_election: registry?.is_registered === 1 && participation?.choice === 'VOTER',
+    election_role: participation?.choice || null
   });
 });
 
@@ -340,6 +490,14 @@ app.post('/api/election/register', requireStudentAuth, rateLimiter(5, 60000), (r
   }
 
   const ugrId = (req as any).studentUgrId as string;
+  const participation = executeQueryOne<{ choice: string }>(
+    'SELECT choice FROM election_participation WHERE ugr_id = ?',
+    [ugrId]
+  );
+  if (participation && participation.choice !== 'VOTER') {
+    res.status(409).json({ error: 'Your selected election role is not voter. Change your role before the registration deadline.' });
+    return;
+  }
   const memberIds = getParliamentVoterIds(res);
   if (!memberIds) return;
   if (!memberIds.includes(ugrId.toUpperCase())) {
@@ -359,17 +517,7 @@ app.post('/api/election/register', requireStudentAuth, rateLimiter(5, 60000), (r
     return;
   }
 
-  executeRun(
-    'INSERT OR IGNORE INTO voter_registry (ugr_id, has_received_token, is_registered) VALUES (?, 0, 1)',
-    [ugrId]
-  );
-  const registration = executeQueryOne<{ is_registered: number }>(
-    'SELECT is_registered FROM voter_registry WHERE ugr_id = ?',
-    [ugrId]
-  );
-  if (registration?.is_registered !== 1) {
-    executeRun('UPDATE voter_registry SET is_registered = 1 WHERE ugr_id = ?', [ugrId]);
-  }
+  chooseElectionParticipation(ugrId, 'VOTER');
   res.status(201).json({ message: 'You are registered as a parliamentary voter' });
 });
 
@@ -389,6 +537,14 @@ app.post('/api/token', requireStudentAuth, rateLimiter(5, 60000), (req: Request,
   if (!parliamentIds) return;
   if (!parliamentIds.includes(ugr_id.toUpperCase())) {
     res.status(403).json({ error: 'Only configured parliament voters may request a ballot token' });
+    return;
+  }
+  const participation = executeQueryOne<{ choice: string }>(
+    'SELECT choice FROM election_participation WHERE ugr_id = ?',
+    [ugr_id]
+  );
+  if (participation?.choice !== 'VOTER') {
+    res.status(403).json({ error: 'Select and register as a voter before requesting a ballot token' });
     return;
   }
 
@@ -606,6 +762,10 @@ app.put('/api/judge/scores/:candidateId', requireJudgeAuth, rateLimiter(30, 6000
 
 app.get('/api/candidate/dashboard', requireStudentAuth, (req: Request, res: Response) => {
   const ugrId = (req as any).studentUgrId as string;
+  if (!isCandidateAccount(ugrId)) {
+    res.status(403).json({ error: 'This account has not selected the candidate role' });
+    return;
+  }
   const candidate = executeQueryOne<{ id: number }>(
     'SELECT id FROM candidates WHERE student_ugr_id = ?',
     [ugrId]
@@ -638,6 +798,73 @@ app.get('/api/candidate/dashboard', requireStudentAuth, (req: Request, res: Resp
     results_published: true,
     standings: rankings,
     own_standing: rankings.find((row) => row.candidate_id === candidate.id) || null
+  });
+});
+
+app.get('/api/candidate/profile', requireStudentAuth, (req: Request, res: Response) => {
+  const ugrId = (req as any).studentUgrId as string;
+  if (!isCandidateAccount(ugrId)) {
+    res.status(403).json({ error: 'Candidate profile access is restricted to its student owner' });
+    return;
+  }
+  const profile = executeQueryOne<{
+    id: number; name: string; position: string; bio: string; manifesto: string;
+  }>(
+    'SELECT id, name, position, bio, manifesto FROM candidates WHERE student_ugr_id = ?',
+    [ugrId]
+  );
+  if (!profile) {
+    res.status(403).json({ error: 'No candidate profile is linked to this account' });
+    return;
+  }
+  res.json(profile);
+});
+
+app.put('/api/candidate/profile', requireStudentAuth, rateLimiter(10, 60000), (req: Request, res: Response) => {
+  const phase = getElectionPhase();
+  if (!phase) {
+    res.status(503).json({ error: 'Election schedule is not configured correctly' });
+    return;
+  }
+  if (phase.phase !== 'scheduled') {
+    res.status(403).json({ error: 'Candidate profiles are locked once the election starts' });
+    return;
+  }
+  const ugrId = (req as any).studentUgrId as string;
+  if (!isCandidateAccount(ugrId)) {
+    res.status(403).json({ error: 'Candidate profiles can only be edited by their student owner' });
+    return;
+  }
+  const profile = executeQueryOne<{ id: number }>(
+    'SELECT id FROM candidates WHERE student_ugr_id = ?',
+    [ugrId]
+  );
+  if (!profile) {
+    res.status(403).json({ error: 'Candidates may edit only their own linked profile' });
+    return;
+  }
+  const { position, bio, manifesto } = req.body || {};
+  if (
+    !WINNING_POSITIONS.includes(position) ||
+    typeof bio !== 'string' || bio.trim().length < 2 || bio.trim().length > 500 ||
+    typeof manifesto !== 'string' || manifesto.trim().length < 20 || manifesto.trim().length > 5000
+  ) {
+    res.status(400).json({ error: 'Candidate profile requires a valid position, a 2–500 character bio, and a 20–5000 character manifesto' });
+    return;
+  }
+  executeRun(
+    'UPDATE candidates SET position = ?, bio = ?, manifesto = ? WHERE id = ? AND student_ugr_id = ?',
+    [position, bio.trim(), manifesto.trim(), profile.id, ugrId]
+  );
+  res.json({
+    id: profile.id,
+    name: executeQueryOne<{ name: string }>(
+      'SELECT name FROM registrar_students WHERE ugr_id = ?',
+      [ugrId]
+    )?.name,
+    position,
+    bio: bio.trim(),
+    manifesto: manifesto.trim()
   });
 });
 
@@ -677,109 +904,8 @@ app.post('/api/admin/login', rateLimiter(10, 60000), (req: Request, res: Respons
   res.json({ token: adminToken });
 });
 
-// POST /api/admin/candidates
-app.post('/api/admin/candidates', requireAdminAuth, (req: Request, res: Response) => {
-  const phase = getElectionPhase();
-  if (!phase || phase.phase !== 'scheduled') {
-    res.status(403).json({ error: 'Candidates can only be added before the election starts' });
-    return;
-  }
-  if (executeQueryOne('SELECT 1 FROM judge_scores LIMIT 1')) {
-    res.status(403).json({ error: 'Candidate roster is locked after judges begin scoring' });
-    return;
-  }
-  const { name, position, bio, manifesto, student_ugr_id: studentUgrId } = req.body || {};
-  if (!name || !WINNING_POSITIONS.includes(position) || typeof studentUgrId !== 'string') {
-    res.status(400).json({ error: 'Name, a valid position, proposal, and candidate student ID are required' });
-    return;
-  }
-  const candidateStudent = executeQueryOne<{ ugr_id: string; voter_type: string }>(
-    'SELECT ugr_id, voter_type FROM registrar_students WHERE UPPER(ugr_id) = ?',
-    [studentUgrId.trim().toUpperCase()]
-  );
-  if (!candidateStudent || candidateStudent.voter_type !== 'STANDARD') {
-    res.status(400).json({ error: 'Candidate student must be a registered non-judge voter' });
-    return;
-  }
-  if (executeQueryOne('SELECT id FROM candidates WHERE student_ugr_id = ?', [candidateStudent.ugr_id])) {
-    res.status(409).json({ error: 'This student already has a candidate profile' });
-    return;
-  }
-  executeRun('INSERT INTO candidates (name, position, bio, manifesto, student_ugr_id) VALUES (?,?,?,?,?)', [
-    name,
-    position,
-    bio || '',
-    manifesto || '',
-    candidateStudent.ugr_id
-  ]);
-  const id = executeQueryOne<{ id: number }>('SELECT last_insert_rowid() as id')!.id;
-  res.status(201).json({ id, name, position, bio: bio || '', manifesto: manifesto || '', student_ugr_id: candidateStudent.ugr_id });
-});
-
-// PUT /api/admin/candidates/:id
-app.put('/api/admin/candidates/:id', requireAdminAuth, (req: Request, res: Response) => {
-  const phase = getElectionPhase();
-  if (!phase || phase.phase !== 'scheduled') {
-    res.status(403).json({ error: 'Candidate profiles are locked once the election starts' });
-    return;
-  }
-  const id = Number(req.params.id);
-  const { name, position, bio, manifesto, student_ugr_id: studentUgrId } = req.body || {};
-  if (!executeQueryOne('SELECT id FROM candidates WHERE id = ?', [id])) {
-    res.status(404).json({ error: 'Candidate does not exist' });
-    return;
-  }
-  if (executeQueryOne('SELECT 1 FROM judge_scores LIMIT 1')) {
-    res.status(403).json({ error: 'Candidate proposals are locked after judges begin scoring' });
-    return;
-  }
-  if (!name || !WINNING_POSITIONS.includes(position) || typeof studentUgrId !== 'string') {
-    res.status(400).json({ error: 'Name, a valid position, proposal, and candidate student ID are required' });
-    return;
-  }
-  const candidateStudent = executeQueryOne<{ ugr_id: string; voter_type: string }>(
-    'SELECT ugr_id, voter_type FROM registrar_students WHERE UPPER(ugr_id) = ?',
-    [studentUgrId.trim().toUpperCase()]
-  );
-  if (!candidateStudent || candidateStudent.voter_type !== 'STANDARD') {
-    res.status(400).json({ error: 'Candidate student must be a registered non-judge voter' });
-    return;
-  }
-  if (executeQueryOne(
-    'SELECT id FROM candidates WHERE student_ugr_id = ? AND id != ?',
-    [candidateStudent.ugr_id, id]
-  )) {
-    res.status(409).json({ error: 'This student already has another candidate profile' });
-    return;
-  }
-  executeRun('UPDATE candidates SET name = ?, position = ?, bio = ?, manifesto = ?, student_ugr_id = ? WHERE id = ?', [
-    name,
-    position,
-    bio || '',
-    manifesto || '',
-    candidateStudent.ugr_id,
-    id
-  ]);
-  res.json({ id, name, position, bio: bio || '', manifesto: manifesto || '', student_ugr_id: candidateStudent.ugr_id });
-});
-
-// DELETE /api/admin/candidates/:id
-app.delete('/api/admin/candidates/:id', requireAdminAuth, (req: Request, res: Response) => {
-  const phase = getElectionPhase();
-  if (!phase || phase.phase !== 'scheduled') {
-    res.status(403).json({ error: 'Candidate profiles are locked once the election starts' });
-    return;
-  }
-  const id = Number(req.params.id);
-  if (
-    executeQueryOne('SELECT 1 FROM votes WHERE candidate_id = ? LIMIT 1', [id]) ||
-    executeQueryOne('SELECT 1 FROM judge_scores WHERE candidate_id = ? LIMIT 1', [id])
-  ) {
-    res.status(409).json({ error: 'A candidate with votes or judge scores cannot be removed from the election record' });
-    return;
-  }
-  executeRun('DELETE FROM candidates WHERE id = ?', [id]);
-  res.json({ message: 'Candidate deleted' });
+app.all(['/api/admin/candidates', '/api/admin/candidates/:id'], requireAdminAuth, (_req: Request, res: Response) => {
+  res.status(403).json({ error: 'Candidate profiles can only be created or edited by their candidate owners; deletion is not permitted' });
 });
 
 // POST /api/admin/announcements

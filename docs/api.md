@@ -36,11 +36,29 @@ Success (200):
     "ugr_id": "UGR/1234/15",
     "name": "Student Name",
     "voter_type": "AUTHORITY",
-    "is_candidate": false
+    "is_candidate": false,
+    "election_role": "JUDGE"
   }
 }
 ```
 `AUTHORITY` identifies one of the two appointed proposal judges. Judges are not parliamentary voters and do not receive a ballot token.
+
+### GET /api/election/participation
+Requires student login. Returns the student's saved role (`CANDIDATE`, `VOTER`, `NONE`, `JUDGE`, or `null`), their linked candidate profile, voter eligibility, and whether role selection is open.
+
+### POST /api/election/participation
+Requires student login and is available until the registration deadline, 12 hours before election start. Standard students must choose exactly one role: `CANDIDATE`, `VOTER`, or `NONE`. Candidate names come from the authenticated registrar record; candidate choice requires a position, 2–500 character bio, and 20–5000 character manifesto. Voter choice requires roster membership, CGPA greater than 3.0, and active cafeteria access. A student's latest choice replaces their earlier choice. Switching away from a candidate with recorded votes is rejected.
+
+Candidate request:
+```json
+{
+  "choice": "CANDIDATE",
+  "position": "President",
+  "bio": "Candidate biography",
+  "manifesto": "A proposal with at least twenty characters."
+}
+```
+Voter or no-registration requests use `{ "choice": "VOTER" }` or `{ "choice": "NONE" }`.
 Error (401):
 ```json
 { "error": "Invalid ID or password" }
@@ -56,7 +74,8 @@ Success, eligible (200):
   "reason": null,
   "has_received_token": false,
   "parliament_member": true,
-  "registered_for_election": false
+  "registered_for_election": false,
+  "election_role": null
 }
 ```
 Success, not eligible (200):
@@ -98,7 +117,7 @@ Success (200):
 After voting opens, only registered parliamentary voters may access this route. Candidate entries then include `judge_score` (the average of both judges' 0–20 scores), `judge_points` (up to 30), current `rank`, `parliament_votes`, `parliament_share` (up to 70), and `final_score`. The score fields are withheld before voting starts.
 
 ### POST /api/election/register
-Requires student login and is only available before `registration_deadline` (12 hours before election start). The account must be among the configured 50–100 eligible parliament voter IDs. Registration is one account per eligible voter.
+Legacy voter-registration endpoint. Requires student login, remains available before `registration_deadline`, and cannot override a saved candidate or no-registration choice. New clients should use `POST /api/election/participation` with `choice: "VOTER"`.
 
 Success (201): `{ "message": "You are registered as a parliamentary voter" }`.
 
@@ -176,7 +195,9 @@ Student Affairs judges authenticate using normal student login.
 
 - `GET /api/judge/candidates`: list candidate proposals and the authenticated judge's own saved score.
 - `PUT /api/judge/scores/:candidateId` with `{ "score": 0 }` through `{ "score": 20 }`: save or revise a score until election end. Each judge must score every candidate before votes are accepted.
-- `GET /api/candidate/dashboard`: authenticated candidate's own and all candidates' current scores/ranks. The login account must be linked to a candidate profile by the admin.
+- `GET /api/candidate/dashboard`: authenticated candidate's own and all candidates' current scores/ranks. The login account must have selected the candidate role and own the linked profile.
+- `GET /api/candidate/profile`: returns the authenticated candidate's own profile.
+- `PUT /api/candidate/profile`: candidate-owned profile edit for position, bio, and manifesto until election start. The server derives the candidate name from the registrar record; another student's profile cannot be edited.
 
 ### GET /api/announcements
 Success (200):
@@ -207,28 +228,7 @@ Error (401):
 { "error": "Invalid admin login" }
 ```
 
-### POST /api/admin/candidates
-Add a candidate.
-
-Request:
-```json
-{ "name": "...", "position": "President", "bio": "...", "manifesto": "...", "student_ugr_id": "UGR/1234/15" }
-```
-Success (201):
-```json
-{ "id": 9, "name": "...", "position": "President", "bio": "...", "manifesto": "..." }
-```
-
-### PUT /api/admin/candidates/:id
-Edit a candidate. Same request body as POST.
-
-Success (200): the updated candidate (same shape as above).
-
-### DELETE /api/admin/candidates/:id
-Success (200):
-```json
-{ "message": "Candidate deleted" }
-```
+Candidate create, update, and delete methods under `/api/admin/candidates` return 403 for authenticated admins. Candidate profiles are created by student role selection and can only be edited by their owner through `PUT /api/candidate/profile`.
 
 ### POST /api/admin/announcements
 Request:

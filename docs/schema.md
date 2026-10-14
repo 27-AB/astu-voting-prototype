@@ -90,7 +90,18 @@ CREATE TABLE voter_registry (
 );
 ```
 
-### 4. `token_email_deliveries`
+### 4. `election_participation`
+Stores each standard student's single mutually exclusive election role. The primary key enforces one choice per student; the application updates it transactionally with the candidate profile or voter registry.
+```sql
+CREATE TABLE election_participation (
+    ugr_id TEXT PRIMARY KEY REFERENCES registrar_students(ugr_id),
+    choice TEXT NOT NULL CHECK (choice IN ('CANDIDATE', 'VOTER', 'NONE')),
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+```
+Existing linked candidate profiles and registered voters are backfilled during database initialization. Candidate profiles are created from the student's authenticated role choice, with `candidates.student_ugr_id` as the ownership link; only that student can update the profile, and only before election start. Admin candidate mutation routes are explicitly denied.
+
+### 5. `token_email_deliveries`
 Durable retry state for scheduled email delivery. This table stores retry metadata. While delivery is pending, it temporarily holds an encrypted raw token and its hash; both are cleared after successful delivery or invalidated at election start.
 ```sql
 CREATE TABLE token_email_deliveries (
@@ -108,7 +119,7 @@ CREATE TABLE token_email_deliveries (
 );
 ```
 
-### 5. `tokens`
+### 6. `tokens`
 Stores one-way cryptographic hashes of generated voting tokens.
 ```sql
 CREATE TABLE tokens (
@@ -118,7 +129,7 @@ CREATE TABLE tokens (
 ```
 *Note:* No student identifier exists in this table. Twelve hours before election start, the backend generates a random 128-bit token, computes `SHA256(raw_token)`, and emails the raw token. Until SMTP accepts the email, an AES-256-GCM encrypted retry copy and its hash are held in `token_email_deliveries`; both are erased from that voter-specific queue after successful delivery. The token table retains only the hash, with no voter reference.
 
-### 6. `candidates`
+### 7. `candidates`
 Nominated student leaders running for union leadership.
 ```sql
 CREATE TABLE candidates (
@@ -133,7 +144,7 @@ CREATE TABLE candidates (
 );
 ```
 
-### `judge_scores`
+### 8. `judge_scores`
 One proposal score per appointed judge and candidate.
 ```sql
 CREATE TABLE judge_scores (
@@ -145,7 +156,7 @@ CREATE TABLE judge_scores (
 );
 ```
 
-### 7. `votes`
+### 9. `votes`
 The digital ballot box.
 ```sql
 CREATE TABLE votes (
@@ -189,7 +200,7 @@ This repository uses Express with `sql.js` and SQLite. The two Student Affairs o
 
 `judge_scores` stores one integer score from 0 through 20 for each judge/candidate pair. Judges may revise their scores until election end. All judges must score every candidate before a ballot is accepted. The average judge score contributes up to 30 points: `average / 20 * 30`. Parliamentary share contributes up to 70 points: `candidate votes / all votes cast for that position * 70`. The final ranking is the sum of those components, sorted within each position with candidate ID as a deterministic tie-breaker.
 
-Judge scores are admin-only before voting starts, visible to voters during the election, and included in public final results after close. Candidate accounts are linked to candidate profiles by `candidates.student_ugr_id`; their dashboard shows all current ranks and score components. Admin candidate setup must link each candidate to their official student account.
+Judge scores are admin-only before voting starts, visible to voters during the election, and included in public final results after close. Candidate accounts are linked to candidate profiles by `candidates.student_ugr_id`; their dashboard shows all current ranks and score components. The authenticated student creates and owns this profile through the candidate participation choice.
 
 `ELECTION_START_TIME` and `ELECTION_END_TIME` must be timezone-qualified ISO-8601 timestamps. The public election-status endpoint reports the server clock; ballots are rejected before the start and at or after the end. Final results become public after the end time.
 

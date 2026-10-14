@@ -4,6 +4,16 @@ export function executeQuery<T = any>(sql: string, params?: any[]): T[];
 export function executeQueryOne<T = any>(sql: string, params?: any[]): T | null;
 export function executeRun(sql: string, params?: any[]): { changes: number };
 export function getConfiguredParliamentIds(): string[];
+export function chooseElectionParticipation(
+  ugrId: string,
+  choice: 'CANDIDATE' | 'VOTER' | 'NONE',
+  profile?: { name: string; position: string; bio: string; manifesto: string } | null
+): {
+  status: 'saved' | 'candidate-has-votes';
+  choice?: 'CANDIDATE' | 'VOTER' | 'NONE';
+  candidate_id?: number | null;
+  changed?: boolean;
+};
 export function hasTokenEmailDeliveryRecord(electionStartTime: string, voterId: string): boolean;
 export function createPendingTokenEmailDelivery(
   electionStartTime: string,

@@ -255,3 +255,74 @@ test('undelivered voting tokens are removed from the anonymous ledger at electio
     null
   );
 });
+
+test('election participation keeps each student to one role and changes voter registration with that role', () => {
+  const studentId = 'UGR/0005/15';
+  const candidateProfile = {
+    name: 'Bethlehem Alemu',
+    position: 'Secretary',
+    bio: 'A student candidate',
+    manifesto: 'I will improve student representation and services.'
+  };
+
+  const candidateChoice = db.chooseElectionParticipation(studentId, 'CANDIDATE', candidateProfile);
+  assert.equal(candidateChoice.status, 'saved');
+  assert.equal(
+    db.executeQueryOne('SELECT choice FROM election_participation WHERE ugr_id = ?', [studentId]).choice,
+    'CANDIDATE'
+  );
+  assert.equal(
+    db.executeQueryOne('SELECT name FROM candidates WHERE student_ugr_id = ?', [studentId]).name,
+    candidateProfile.name
+  );
+  assert.equal(
+    db.executeQueryOne('SELECT is_registered FROM voter_registry WHERE ugr_id = ?', [studentId]).is_registered,
+    0
+  );
+
+  db.chooseElectionParticipation(studentId, 'VOTER');
+  assert.equal(
+    db.executeQueryOne('SELECT choice FROM election_participation WHERE ugr_id = ?', [studentId]).choice,
+    'VOTER'
+  );
+  assert.equal(db.executeQueryOne('SELECT id FROM candidates WHERE student_ugr_id = ?', [studentId]), null);
+  assert.equal(
+    db.executeQueryOne('SELECT is_registered FROM voter_registry WHERE ugr_id = ?', [studentId]).is_registered,
+    1
+  );
+
+  db.chooseElectionParticipation(studentId, 'NONE');
+  assert.equal(
+    db.executeQueryOne('SELECT choice FROM election_participation WHERE ugr_id = ?', [studentId]).choice,
+    'NONE'
+  );
+  assert.equal(
+    db.executeQueryOne('SELECT is_registered FROM voter_registry WHERE ugr_id = ?', [studentId]).is_registered,
+    0
+  );
+});
+
+test('a candidate with recorded votes cannot switch roles and lose their profile', () => {
+  const studentId = 'UGR/0005/15';
+  db.chooseElectionParticipation(studentId, 'CANDIDATE', {
+    name: 'Bethlehem Alemu',
+    position: 'Secretary',
+    bio: 'A student candidate',
+    manifesto: 'I will improve student representation and services.'
+  });
+  const candidate = db.executeQueryOne('SELECT id FROM candidates WHERE student_ugr_id = ?', [studentId]);
+  db.executeRun('INSERT INTO votes (candidate_id) VALUES (?)', [candidate.id]);
+
+  assert.equal(
+    db.chooseElectionParticipation(studentId, 'VOTER').status,
+    'candidate-has-votes'
+  );
+  assert.equal(
+    db.executeQueryOne('SELECT choice FROM election_participation WHERE ugr_id = ?', [studentId]).choice,
+    'CANDIDATE'
+  );
+  assert.equal(
+    db.executeQueryOne('SELECT id FROM candidates WHERE student_ugr_id = ?', [studentId]).id,
+    candidate.id
+  );
+});

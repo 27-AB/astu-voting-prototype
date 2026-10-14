@@ -91,6 +91,9 @@ export function saveDb(db) {
 }
 
 function initializeTables(db) {
+  const hadParticipationTable = Boolean(db.exec(
+    "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'election_participation'"
+  )[0]?.values.length);
   db.run(`
     CREATE TABLE IF NOT EXISTS registrar_students (
       ugr_id TEXT PRIMARY KEY,
@@ -111,6 +114,13 @@ function initializeTables(db) {
       ugr_id TEXT PRIMARY KEY,
       has_received_token INTEGER NOT NULL DEFAULT 0,
       is_registered INTEGER NOT NULL DEFAULT 0,
+      FOREIGN KEY (ugr_id) REFERENCES registrar_students(ugr_id)
+    );
+
+    CREATE TABLE IF NOT EXISTS election_participation (
+      ugr_id TEXT PRIMARY KEY,
+      choice TEXT NOT NULL CHECK (choice IN ('CANDIDATE', 'VOTER', 'NONE')),
+      updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
       FOREIGN KEY (ugr_id) REFERENCES registrar_students(ugr_id)
     );
 
@@ -183,6 +193,20 @@ function initializeTables(db) {
   addColumnIfMissing(db, 'token_email_deliveries', 'token_ciphertext', 'TEXT');
   addColumnIfMissing(db, 'token_email_deliveries', 'token_iv', 'TEXT');
   addColumnIfMissing(db, 'token_email_deliveries', 'token_auth_tag', 'TEXT');
+  if (!hadParticipationTable) {
+    db.run(`
+      INSERT OR IGNORE INTO election_participation (ugr_id, choice)
+      SELECT student_ugr_id, 'CANDIDATE'
+      FROM candidates
+      WHERE student_ugr_id IS NOT NULL
+    `);
+    db.run(`
+      INSERT OR IGNORE INTO election_participation (ugr_id, choice)
+      SELECT ugr_id, 'VOTER'
+      FROM voter_registry
+      WHERE is_registered = 1
+    `);
+  }
 }
 
 function applyAuthorityConfiguration(db) {
@@ -208,6 +232,81 @@ function applyAuthorityConfiguration(db) {
 
 export function getConfiguredParliamentIds() {
   return configuredParliamentIds();
+}
+
+export function chooseElectionParticipation(ugrId, choice, profile = null) {
+  if (!dbInstance) throw new Error('Database not initialized');
+  const db = dbInstance;
+  db.run('BEGIN IMMEDIATE TRANSACTION');
+  try {
+    const existing = executeQueryOne(
+      'SELECT choice FROM election_participation WHERE ugr_id = ?',
+      [ugrId]
+    );
+    const existingCandidate = executeQueryOne(
+      'SELECT id FROM candidates WHERE student_ugr_id = ?',
+      [ugrId]
+    );
+
+    if (existingCandidate && choice !== 'CANDIDATE') {
+      const hasVotes = executeQueryOne(
+        'SELECT 1 FROM votes WHERE candidate_id = ? LIMIT 1',
+        [existingCandidate.id]
+      );
+      if (hasVotes) {
+        db.run('ROLLBACK');
+        return { status: 'candidate-has-votes' };
+      }
+      db.run('DELETE FROM judge_scores WHERE candidate_id = ?', [existingCandidate.id]);
+      db.run('DELETE FROM candidates WHERE id = ?', [existingCandidate.id]);
+    }
+
+    if (choice === 'CANDIDATE') {
+      db.run(
+        'UPDATE voter_registry SET is_registered = 0 WHERE ugr_id = ?',
+        [ugrId]
+      );
+      if (existingCandidate) {
+        db.run(
+          'UPDATE candidates SET name = ?, position = ?, bio = ?, manifesto = ? WHERE id = ?',
+          [profile.name, profile.position, profile.bio, profile.manifesto, existingCandidate.id]
+        );
+      } else {
+        db.run(
+          'INSERT INTO candidates (name, position, bio, manifesto, student_ugr_id) VALUES (?, ?, ?, ?, ?)',
+          [profile.name, profile.position, profile.bio, profile.manifesto, ugrId]
+        );
+      }
+    } else if (choice === 'VOTER') {
+      db.run(
+        'INSERT INTO voter_registry (ugr_id, has_received_token, is_registered) VALUES (?, 0, 1) ' +
+        'ON CONFLICT(ugr_id) DO UPDATE SET is_registered = 1',
+        [ugrId]
+      );
+    } else {
+      db.run('UPDATE voter_registry SET is_registered = 0 WHERE ugr_id = ?', [ugrId]);
+    }
+
+    db.run(
+      `INSERT INTO election_participation (ugr_id, choice, updated_at)
+       VALUES (?, ?, CURRENT_TIMESTAMP)
+       ON CONFLICT(ugr_id) DO UPDATE SET choice = excluded.choice, updated_at = CURRENT_TIMESTAMP`,
+      [ugrId, choice]
+    );
+    db.run('COMMIT');
+    saveDb(db);
+    return {
+      status: 'saved',
+      choice,
+      candidate_id: choice === 'CANDIDATE'
+        ? executeQueryOne('SELECT id FROM candidates WHERE student_ugr_id = ?', [ugrId]).id
+        : null,
+      changed: existing?.choice !== choice
+    };
+  } catch (error) {
+    db.run('ROLLBACK');
+    throw error;
+  }
 }
 
 export function hasTokenEmailDeliveryRecord(electionStartTime, voterId) {
@@ -511,6 +610,7 @@ export function performRollover() {
   dbInstance.run('DELETE FROM votes');
   dbInstance.run('DELETE FROM tokens');
   dbInstance.run('DELETE FROM token_email_deliveries');
+  dbInstance.run('DELETE FROM election_participation');
   dbInstance.run('UPDATE voter_registry SET has_received_token = 0, is_registered = 0');
   saveDb(dbInstance);
 

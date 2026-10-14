@@ -78,6 +78,7 @@ export async function login(ugr_id, password) {
   save("student_name", data.student.name);
   save("voter_type", data.student.voter_type);
   save("is_candidate", String(data.student.is_candidate));
+  save("election_role", data.student.election_role || "");
   return data;
 }
 
@@ -159,6 +160,30 @@ export async function getCandidateDashboard() {
   return request("/api/candidate/dashboard", "GET", null, "student_token");
 }
 
+export async function getElectionParticipation() {
+  return request("/api/election/participation", "GET", null, "student_token");
+}
+
+export async function chooseElectionParticipation(choice, profile) {
+  const data = await request(
+    "/api/election/participation",
+    "POST",
+    { choice, ...profile },
+    "student_token",
+  );
+  save("election_role", data.election_role);
+  save("is_candidate", String(data.election_role === "CANDIDATE"));
+  return data;
+}
+
+export async function getCandidateProfile() {
+  return request("/api/candidate/profile", "GET", null, "student_token");
+}
+
+export async function updateCandidateProfile(profile) {
+  return request("/api/candidate/profile", "PUT", profile, "student_token");
+}
+
 export async function getAnnouncements() {
   if (USE_MOCK) {
     await wait(200);
@@ -182,34 +207,6 @@ export async function adminLogin(username, password) {
   const data = await request("/api/admin/login", "POST", { username, password });
   save("admin_token", data.token);
   return data;
-}
-
-export async function addCandidate(c) {
-  if (USE_MOCK) {
-    await wait(200);
-    const created = { ...c, id: Date.now() };
-    mockCandidates.push(created);
-    return created;
-  }
-  return request("/api/admin/candidates", "POST", c, "admin_token");
-}
-
-export async function updateCandidate(id, c) {
-  if (USE_MOCK) {
-    await wait(200);
-    mockCandidates = mockCandidates.map((x) => (x.id === id ? { ...x, ...c } : x));
-    return mockCandidates.find((x) => x.id === id);
-  }
-  return request(`/api/admin/candidates/${id}`, "PUT", c, "admin_token");
-}
-
-export async function deleteCandidate(id) {
-  if (USE_MOCK) {
-    await wait(200);
-    mockCandidates = mockCandidates.filter((x) => x.id !== id);
-    return { message: "Candidate deleted" };
-  }
-  return request(`/api/admin/candidates/${id}`, "DELETE", null, "admin_token");
 }
 
 export async function postAnnouncement(title, body) {

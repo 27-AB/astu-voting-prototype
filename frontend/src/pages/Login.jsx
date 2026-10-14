@@ -27,9 +27,11 @@ export default function Login() {
       navigate(
         data.student.voter_type === "AUTHORITY"
           ? "/judge"
-          : data.student.is_candidate
+          : data.student.election_role === "CANDIDATE"
             ? "/candidate"
-            : "/eligibility",
+            : data.student.election_role === "VOTER"
+              ? "/eligibility"
+              : "/participation",
       );
     } catch (err) {
       setError(err.message); // e.g. "Invalid ID or password"
