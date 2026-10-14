@@ -1,4 +1,4 @@
-import astuLogo from "../assets/astu-logo.jpg";
+import astuLogo from "../assets/astu-logo.png";
 
 export default function Brand({ label }) {
   return (
